@@ -203,12 +203,17 @@ class Event(Model):
                 return v
         return None
 
+    @property
+    def dist(self):
+        return self.get_tag('sentry:dist')
+
     def as_dict(self):
         # We use a OrderedDict to keep elements ordered for a potential JSON serializer
         data = OrderedDict()
         data['id'] = self.event_id
         data['project'] = self.project_id
         data['release'] = self.get_tag('sentry:release')
+        data['dist'] = self.dist
         data['platform'] = self.platform
         data['culprit'] = self.group.culprit
         data['message'] = self.get_legacy_message()
@@ -258,12 +263,16 @@ class Event(Model):
     @property
     def culprit(self):
         warnings.warn('Event.culprit is deprecated. Use Group.culprit instead.')
-        return self.get_tag('transaction') or self.group.culprit
+        return self.transaction or self.group.culprit
 
     @property
     def checksum(self):
         warnings.warn('Event.checksum is no longer used', DeprecationWarning)
         return ''
+
+    @property
+    def transaction(self):
+        return self.get_tag('transaction')
 
     def get_email_subject(self):
         template = self.project.get_option('mail:subject_template')

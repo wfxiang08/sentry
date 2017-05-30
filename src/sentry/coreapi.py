@@ -15,9 +15,11 @@ import logging
 import six
 import uuid
 import zlib
+import re
 
 from collections import MutableMapping
 from datetime import datetime, timedelta
+from django.core.exceptions import SuspiciousOperation
 from django.utils.crypto import constant_time_compare
 from gzip import GzipFile
 from six import BytesIO
@@ -34,7 +36,8 @@ from sentry.interfaces.base import get_interface, InterfaceValidationError
 from sentry.interfaces.csp import Csp
 from sentry.event_manager import EventManager
 from sentry.models import EventError, ProjectKey, TagKey, TagValue
-from sentry.tasks.store import preprocess_event
+from sentry.tasks.store import preprocess_event, \
+    preprocess_event_from_reprocessing
 from sentry.utils import json
 from sentry.utils.auth import parse_auth_header
 from sentry.utils.csp import is_valid_csp_report
@@ -51,6 +54,9 @@ try:
     import ujson as json  # noqa
 except ImportError:
     from sentry.utils import json
+
+
+_dist_re = re.compile(r'^[a-zA-Z0-9_.-]+$')
 
 
 class APIError(Exception):
@@ -185,16 +191,21 @@ class ClientApiHelper(object):
         self.log = ClientLogHelper(self.context)
 
     def auth_from_request(self, request):
+        result = {
+            k: request.GET[k]
+            for k in six.iterkeys(request.GET)
+            if k[:7] == 'sentry_'
+        }
+
         if request.META.get('HTTP_X_SENTRY_AUTH', '')[:7].lower() == 'sentry ':
+            if result:
+                raise SuspiciousOperation('Multiple authentication payloads were detected.')
             result = parse_auth_header(request.META['HTTP_X_SENTRY_AUTH'])
         elif request.META.get('HTTP_AUTHORIZATION', '')[:7].lower() == 'sentry ':
+            if result:
+                raise SuspiciousOperation('Multiple authentication payloads were detected.')
             result = parse_auth_header(request.META['HTTP_AUTHORIZATION'])
-        else:
-            result = {
-                k: request.GET[k]
-                for k in six.iterkeys(request.GET)
-                if k[:7] == 'sentry_'
-            }
+
         if not result:
             raise APIUnauthorized('Unable to find authentication information')
 
@@ -211,7 +222,7 @@ class ClientApiHelper(object):
         """
         return origin_from_request(request)
 
-    def project_id_from_auth(self, auth):
+    def project_key_from_auth(self, auth):
         if not auth.public_key:
             raise APIUnauthorized('Invalid api key')
 
@@ -236,7 +247,10 @@ class ClientApiHelper(object):
         if not pk.roles.store:
             raise APIUnauthorized('Key does not allow event storage access')
 
-        return pk.project_id
+        return pk
+
+    def project_id_from_auth(self, auth):
+        return self.project_key_from_auth(auth).project_id
 
     def decode_data(self, encoded_data):
         try:
@@ -684,6 +698,25 @@ class ClientApiHelper(object):
                 })
                 del data['release']
 
+        if data.get('dist'):
+            data['dist'] = six.text_type(data['dist']).strip()
+            if not data.get('release'):
+                data['dist'] = None
+            elif len(data['dist']) > 64:
+                data['errors'].append({
+                    'type': EventError.VALUE_TOO_LONG,
+                    'name': 'dist',
+                    'value': data['dist'],
+                })
+                del data['dist']
+            elif _dist_re.match(data['dist']) is None:
+                data['errors'].append({
+                    'type': EventError.INVALID_DATA,
+                    'name': 'dist',
+                    'value': data['dist'],
+                })
+                del data['dist']
+
         if data.get('environment'):
             data['environment'] = six.text_type(data['environment'])
             if len(data['environment']) > 64:
@@ -741,13 +774,16 @@ class ClientApiHelper(object):
         if not got_ip and set_if_missing:
             data.setdefault('sentry.interfaces.User', {})['ip_address'] = ip_address
 
-    def insert_data_to_database(self, data):
+    def insert_data_to_database(self, data, from_reprocessing=False):
         # we might be passed LazyData
         if isinstance(data, LazyData):
             data = dict(data.items())
         cache_key = 'e:{1}:{0}'.format(data['project'], data['event_id'])
         default_cache.set(cache_key, data, timeout=3600)
-        preprocess_event.delay(cache_key=cache_key, start_time=time())
+        task = from_reprocessing and \
+            preprocess_event_from_reprocessing or preprocess_event
+        task.delay(cache_key=cache_key, start_time=time(),
+            event_id=data['event_id'])
 
 
 class CspApiHelper(ClientApiHelper):

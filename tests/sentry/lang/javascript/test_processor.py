@@ -10,10 +10,10 @@ from libsourcemap import Token
 from mock import patch
 from requests.exceptions import RequestException
 
-from sentry.interfaces.stacktrace import Stacktrace
+from sentry import http
 from sentry.lang.javascript.processor import (
-    BadSource, discover_sourcemap, fetch_sourcemap, fetch_file, generate_module,
-    SourceProcessor, trim_line, UrlResult, fetch_release_file, CannotFetchSource,
+    discover_sourcemap, fetch_sourcemap, fetch_file, generate_module,
+    trim_line, fetch_release_file,
     UnparseableSourcemap,
 )
 from sentry.lang.javascript.errormapping import (
@@ -58,8 +58,9 @@ class FetchReleaseFileTest(TestCase):
 
         result = fetch_release_file('file.min.js', release)
 
-        assert type(result[1]) is six.binary_type
-        assert result == (
+        assert type(result.body) is six.binary_type
+        assert result == http.UrlResult(
+            'file.min.js',
             {'content-type': 'application/json; charset=utf-8'},
             binary_body,
             200,
@@ -68,6 +69,62 @@ class FetchReleaseFileTest(TestCase):
 
         # test with cache hit, which should be compressed
         new_result = fetch_release_file('file.min.js', release)
+
+        assert result == new_result
+
+    def test_distribution(self):
+        project = self.project
+        release = Release.objects.create(
+            organization_id=project.organization_id,
+            version='abc',
+        )
+        release.add_project(project)
+
+        other_file = File.objects.create(
+            name='file.min.js',
+            type='release.file',
+            headers={'Content-Type': 'application/json; charset=utf-8'},
+        )
+        file = File.objects.create(
+            name='file.min.js',
+            type='release.file',
+            headers={'Content-Type': 'application/json; charset=utf-8'},
+        )
+
+        binary_body = unicode_body.encode('utf-8')
+        other_file.putfile(six.BytesIO(b''))
+        file.putfile(six.BytesIO(binary_body))
+
+        dist = release.add_dist('foo')
+
+        ReleaseFile.objects.create(
+            name='file.min.js',
+            release=release,
+            organization_id=project.organization_id,
+            file=other_file,
+        )
+
+        ReleaseFile.objects.create(
+            name='file.min.js',
+            release=release,
+            dist=dist,
+            organization_id=project.organization_id,
+            file=file,
+        )
+
+        result = fetch_release_file('file.min.js', release, dist)
+
+        assert type(result.body) is six.binary_type
+        assert result == http.UrlResult(
+            'file.min.js',
+            {'content-type': 'application/json; charset=utf-8'},
+            binary_body,
+            200,
+            'utf-8',
+        )
+
+        # test with cache hit, which should be compressed
+        new_result = fetch_release_file('file.min.js', release, dist)
 
         assert result == new_result
 
@@ -114,26 +171,27 @@ class FetchFileTest(TestCase):
     def test_connection_failure(self):
         responses.add(responses.GET, 'http://example.com', body=RequestException())
 
-        with pytest.raises(BadSource):
+        with pytest.raises(http.BadSource):
             fetch_file('http://example.com')
 
         assert len(responses.calls) == 1
 
         # ensure we use the cached domain-wide failure for the second call
-        with pytest.raises(BadSource):
+        with pytest.raises(http.BadSource):
             fetch_file('http://example.com/foo/bar')
 
         assert len(responses.calls) == 1
 
     @responses.activate
     def test_non_url_without_release(self):
-        with pytest.raises(BadSource):
+        with pytest.raises(http.BadSource):
             fetch_file('/example.js')
 
     @responses.activate
     @patch('sentry.lang.javascript.processor.fetch_release_file')
     def test_non_url_with_release(self, mock_fetch_release_file):
-        mock_fetch_release_file.return_value = (
+        mock_fetch_release_file.return_value = http.UrlResult(
+            '/example.js',
             {'content-type': 'application/json'},
             'foo',
             200,
@@ -176,7 +234,7 @@ class FetchFileTest(TestCase):
     @responses.activate
     def test_truncated(self):
         url = truncatechars('http://example.com', 3)
-        with pytest.raises(CannotFetchSource) as exc:
+        with pytest.raises(http.CannotFetch) as exc:
             fetch_file(url)
 
         assert exc.value.data['type'] == EventError.JS_MISSING_SOURCE
@@ -186,38 +244,42 @@ class FetchFileTest(TestCase):
 class DiscoverSourcemapTest(TestCase):
     # discover_sourcemap(result)
     def test_simple(self):
-        result = UrlResult('http://example.com', {}, '', None)
+        result = http.UrlResult('http://example.com', {}, '', 200, None)
         assert discover_sourcemap(result) is None
 
-        result = UrlResult('http://example.com', {
+        result = http.UrlResult('http://example.com', {
             'x-sourcemap': 'http://example.com/source.map.js'
-        }, '', None)
+        }, '', 200, None)
         assert discover_sourcemap(result) == 'http://example.com/source.map.js'
 
-        result = UrlResult('http://example.com', {
+        result = http.UrlResult('http://example.com', {
             'sourcemap': 'http://example.com/source.map.js'
-        }, '', None)
+        }, '', 200, None)
         assert discover_sourcemap(result) == 'http://example.com/source.map.js'
 
-        result = UrlResult('http://example.com', {}, '//@ sourceMappingURL=http://example.com/source.map.js\nconsole.log(true)', None)
+        result = http.UrlResult('http://example.com', {}, '//@ sourceMappingURL=http://example.com/source.map.js\nconsole.log(true)', 200, None)
         assert discover_sourcemap(result) == 'http://example.com/source.map.js'
 
-        result = UrlResult('http://example.com', {}, '//# sourceMappingURL=http://example.com/source.map.js\nconsole.log(true)', None)
+        result = http.UrlResult('http://example.com', {}, '//# sourceMappingURL=http://example.com/source.map.js\nconsole.log(true)', 200, None)
         assert discover_sourcemap(result) == 'http://example.com/source.map.js'
 
-        result = UrlResult('http://example.com', {}, 'console.log(true)\n//@ sourceMappingURL=http://example.com/source.map.js', None)
+        result = http.UrlResult('http://example.com', {}, 'console.log(true)\n//@ sourceMappingURL=http://example.com/source.map.js', 200, None)
         assert discover_sourcemap(result) == 'http://example.com/source.map.js'
 
-        result = UrlResult('http://example.com', {}, 'console.log(true)\n//# sourceMappingURL=http://example.com/source.map.js', None)
+        result = http.UrlResult('http://example.com', {}, 'console.log(true)\n//# sourceMappingURL=http://example.com/source.map.js', 200, None)
         assert discover_sourcemap(result) == 'http://example.com/source.map.js'
 
-        result = UrlResult('http://example.com', {}, 'console.log(true)\n//# sourceMappingURL=http://example.com/source.map.js\n//# sourceMappingURL=http://example.com/source2.map.js', None)
+        result = http.UrlResult('http://example.com', {}, 'console.log(true)\n//# sourceMappingURL=http://example.com/source.map.js\n//# sourceMappingURL=http://example.com/source2.map.js', 200, None)
         assert discover_sourcemap(result) == 'http://example.com/source2.map.js'
 
-        result = UrlResult('http://example.com', {}, '//# sourceMappingURL=app.map.js/*ascii:lol*/', None)
+        # sourceMappingURL found directly after code w/o newline
+        result = http.UrlResult('http://example.com', {}, 'console.log(true);//# sourceMappingURL=http://example.com/source.map.js', 200, None)
+        assert discover_sourcemap(result) == 'http://example.com/source.map.js'
+
+        result = http.UrlResult('http://example.com', {}, '//# sourceMappingURL=app.map.js/*ascii:lol*/', 200, None)
         assert discover_sourcemap(result) == 'http://example.com/app.map.js'
 
-        result = UrlResult('http://example.com', {}, '//# sourceMappingURL=/*lol*/', None)
+        result = http.UrlResult('http://example.com', {}, '//# sourceMappingURL=/*lol*/', 200, None)
         with self.assertRaises(AssertionError):
             discover_sourcemap(result)
 
@@ -248,7 +310,9 @@ class GenerateModuleTest(TestCase):
         assert generate_module('/a/javascripts/application-bundle-149360d3414c26adac3febdf6832e25c.min.js') == 'a/javascripts/application-bundle'
         assert generate_module('https://example.com/libs/libs-20150417171659.min.js') == 'libs/libs'
         assert generate_module('webpack:///92cd589eca8235e7b373bf5ae94ebf898e3b949c/vendor.js') == 'vendor'
-        assert generate_module('webpack:///example/92cd589eca8235e7b373bf5ae94ebf898e3b949c/vendor.js') == 'vendor'
+        assert generate_module('webpack:///92cd589eca8235e7b373bf5ae94ebf898e3b949c/vendor.js') == 'vendor'
+        assert generate_module('app:///92cd589eca8235e7b373bf5ae94ebf898e3b949c/vendor.js') == 'vendor'
+        assert generate_module('app:///example/92cd589eca8235e7b373bf5ae94ebf898e3b949c/vendor.js') == 'vendor'
         assert generate_module('~/app/components/projectHeader/projectSelector.jsx') == 'app/components/projectHeader/projectSelector'
 
 
@@ -274,16 +338,6 @@ class FetchSourcemapTest(TestCase):
             fetch_sourcemap('data:application/json;base64,xxx')
 
     @responses.activate
-    def test_simple_non_utf8(self):
-        responses.add(responses.GET, 'http://example.com', body='{}',
-                      content_type='application/json; charset=NOPE')
-
-        with pytest.raises(CannotFetchSource) as exc:
-            fetch_sourcemap('http://example.com')
-
-        assert exc.value.data['type'] == EventError.JS_INVALID_SOURCE_ENCODING
-
-    @responses.activate
     def test_garbage_json(self):
         responses.add(responses.GET, 'http://example.com', body='xxxx',
                       content_type='application/json')
@@ -304,130 +358,72 @@ class TrimLineTest(TestCase):
         assert trim_line(self.long_line, column=9999) == '{snip} gn. It is, in effect, conditioned to prefer bad design, because that is what it lives with. The new becomes threatening, the old reassuring.'
 
 
-class SourceProcessorTest(TestCase):
-    def test_get_stacktraces_returns_stacktrace_interface(self):
-        data = {
-            'message': 'hello',
-            'platform': 'javascript',
-            'sentry.interfaces.Stacktrace': {
-                'frames': [
-                    {
-                        'abs_path': 'http://example.com/foo.js',
-                        'filename': 'foo.js',
-                        'lineno': 4,
-                        'colno': 0,
-                    },
-                    {
-                        'abs_path': 'http://example.com/foo.js',
-                        'filename': 'foo.js',
-                        'lineno': 1,
-                        'colno': 0,
-                    },
-                ],
-            },
+def test_get_culprit_is_patched():
+    from sentry.lang.javascript.plugin import fix_culprit, generate_modules
+
+    data = {
+        'message': 'hello',
+        'platform': 'javascript',
+        'sentry.interfaces.Exception': {
+            'values': [{
+                'type': 'Error',
+                'stacktrace': {
+                    'frames': [
+                        {
+                            'abs_path': 'http://example.com/foo.js',
+                            'filename': 'foo.js',
+                            'lineno': 4,
+                            'colno': 0,
+                            'function': 'thing',
+                        },
+                        {
+                            'abs_path': 'http://example.com/bar.js',
+                            'filename': 'bar.js',
+                            'lineno': 1,
+                            'colno': 0,
+                            'function': 'oops',
+                        },
+                    ],
+                },
+            }],
         }
+    }
+    generate_modules(data)
+    fix_culprit(data)
+    assert data['culprit'] == 'bar in oops'
 
-        processor = SourceProcessor(project=self.project)
-        result = processor.get_stacktraces(data)
-        assert len(result) == 1
-        assert type(result[0][1]) is Stacktrace
 
-    def test_get_stacktraces_returns_exception_interface(self):
-        data = {
-            'message': 'hello',
-            'platform': 'javascript',
-            'sentry.interfaces.Exception': {
-                'values': [{
-                    'type': 'Error',
-                    'stacktrace': {
-                        'frames': [
-                            {
-                                'abs_path': 'http://example.com/foo.js',
-                                'filename': 'foo.js',
-                                'lineno': 4,
-                                'colno': 0,
-                            },
-                            {
-                                'abs_path': 'http://example.com/foo.js',
-                                'filename': 'foo.js',
-                                'lineno': 1,
-                                'colno': 0,
-                            },
-                        ],
-                    },
-                }],
-            }
+def test_ensure_module_names():
+    from sentry.lang.javascript.plugin import generate_modules
+    data = {
+        'message': 'hello',
+        'platform': 'javascript',
+        'sentry.interfaces.Exception': {
+            'values': [{
+                'type': 'Error',
+                'stacktrace': {
+                    'frames': [
+                        {
+                            'filename': 'foo.js',
+                            'lineno': 4,
+                            'colno': 0,
+                            'function': 'thing',
+                        },
+                        {
+                            'abs_path': 'http://example.com/foo/bar.js',
+                            'filename': 'bar.js',
+                            'lineno': 1,
+                            'colno': 0,
+                            'function': 'oops',
+                        },
+                    ],
+                },
+            }],
         }
-
-        processor = SourceProcessor(project=self.project)
-        result = processor.get_stacktraces(data)
-        assert len(result) == 1
-        assert type(result[0][1]) is Stacktrace
-
-    def test_get_culprit_is_patched(self):
-        data = {
-            'message': 'hello',
-            'platform': 'javascript',
-            'sentry.interfaces.Exception': {
-                'values': [{
-                    'type': 'Error',
-                    'stacktrace': {
-                        'frames': [
-                            {
-                                'abs_path': 'http://example.com/foo.js',
-                                'filename': 'foo.js',
-                                'lineno': 4,
-                                'colno': 0,
-                                'function': 'thing',
-                            },
-                            {
-                                'abs_path': 'http://example.com/bar.js',
-                                'filename': 'bar.js',
-                                'lineno': 1,
-                                'colno': 0,
-                                'function': 'oops',
-                            },
-                        ],
-                    },
-                }],
-            }
-        }
-
-        processor = SourceProcessor(project=self.project)
-        result = processor.process(data)
-        assert result['culprit'] == 'bar in oops'
-
-    def test_ensure_module_names(self):
-        data = {
-            'message': 'hello',
-            'platform': 'javascript',
-            'sentry.interfaces.Exception': {
-                'values': [{
-                    'type': 'Error',
-                    'stacktrace': {
-                        'frames': [
-                            {
-                                'filename': 'foo.js',
-                                'lineno': 4,
-                                'colno': 0,
-                                'function': 'thing',
-                            },
-                            {
-                                'abs_path': 'http://example.com/foo/bar.js',
-                                'filename': 'bar.js',
-                                'lineno': 1,
-                                'colno': 0,
-                                'function': 'oops',
-                            },
-                        ],
-                    },
-                }],
-            }
-        }
-        processor = SourceProcessor(project=self.project)
-        result = processor.process(data)
-        exc = result['sentry.interfaces.Exception']['values'][0]
-        assert exc['stacktrace']['frames'][1]['module'] == 'foo/bar'
+    }
+    generate_modules(data)
+    exc = data['sentry.interfaces.Exception']['values'][0]
+    assert exc['stacktrace']['frames'][1]['module'] == 'foo/bar'
 
 
 class ErrorMappingTest(TestCase):

@@ -48,7 +48,7 @@ from sentry.utils.distutils import (
 )
 
 # The version of sentry
-VERSION = '8.13.0.dev0'
+VERSION = '8.17.0.dev0'
 
 # Hack to prevent stupid "TypeError: 'NoneType' object is not callable" error
 # in multiprocessing/util.py _exit_function when running `python
@@ -78,6 +78,7 @@ tests_require = [
     'cqlsh',
     # /cassandra
     'datadog',
+    'msgpack-python<0.5.0',
     'pytest-cov>=1.8.0,<1.9.0',
     'pytest-timeout>=0.5.0,<0.6.0',
     'pytest-xdist>=1.11.0,<1.12.0',
@@ -93,14 +94,13 @@ install_requires = [
     # 'cryptography>=1.3,<1.4',
     'cssutils>=0.9.9,<0.10.0',
     'Django>=1.6.0,<1.7',
-    'django-bitfield>=1.7.0,<1.8.0',
     'django-crispy-forms>=1.4.0,<1.5.0',
     'django-debug-toolbar>=1.3.2,<1.4.0',
     'django-jsonfield>=0.9.13,<0.9.14',
     'django-picklefield>=0.3.0,<0.4.0',
     'django-sudo>=2.1.0,<3.0.0',
     'django-templatetag-sugar>=0.1.0',
-    'djangorestframework>=2.3.8,<2.4.0',
+    'djangorestframework>=2.4.8,<2.5.0',
     'email-reply-parser>=0.2.0,<0.3.0',
     'enum34>=0.9.18,<1.2.0',
     'exam>=0.5.1',
@@ -112,10 +112,12 @@ install_requires = [
 
     'ipaddress>=1.0.16,<1.1.0',
     'libsourcemap>=0.5.0,<0.6.0',
+    'loremipsum>=1.0.5,<1.1.0',
     'mock>=0.8.0,<1.1',
+    'mmh3>=2.3.1,<2.4',
     'oauth2>=1.5.167',
-    'percy>=0.2.5',
-    'petname>=1.7,<1.8',
+    'percy>=0.4.4',
+    'petname>=2.0,<2.1',
     'Pillow>=3.2.0,<3.3.0',
     'progressbar2>=3.10,<3.11',
     'psycopg2>=2.6.0,<2.7.0',
@@ -136,7 +138,7 @@ install_requires = [
     'statsd>=3.1.0,<3.2.0',
     'structlog==16.1.0',
     'South==1.0.1',
-    'symsynd>=1.3.0,<2.0.0',
+    'symsynd>=2.2.0,<3.0.0',
     'toronado>=0.0.11,<0.1.0',
     'ua-parser>=0.6.1,<0.8.0',
     'urllib3>=1.14,<1.17',
@@ -195,7 +197,7 @@ setup(
     install_requires=install_requires,
     extras_require={
         'dev': dev_requires,
-        'postgres': install_requires,
+        'postgres': [],
         'tests': tests_require,
     },
     cmdclass=cmdclass,
@@ -213,6 +215,9 @@ setup(
         'Intended Audience :: Developers',
         'Intended Audience :: System Administrators',
         'Operating System :: POSIX :: Linux',
+        'Programming Language :: Python :: 2',
+        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 2 :: Only',
         'Topic :: Software Development'
     ],
 )

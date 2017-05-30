@@ -19,6 +19,7 @@ from sentry.models import (
 )
 from sentry.utils import auth
 from sentry.web.helpers import render_to_response
+from sentry.api.serializers import serialize
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger('sentry.audit.ui')
@@ -248,12 +249,18 @@ class BaseView(View, OrganizationMixin):
         )
 
     def create_audit_entry(self, request, transaction_id=None, **kwargs):
-        entry = AuditLogEntry.objects.create(
+        entry = AuditLogEntry(
             actor=request.user if request.user.is_authenticated() else None,
             # TODO(jtcunning): assert that REMOTE_ADDR is a real IP.
             ip_address=request.META['REMOTE_ADDR'],
             **kwargs
         )
+
+        # Only create a real AuditLogEntry record if we are passing an event type
+        # otherwise, we want to still log to our actual logging
+        if entry.event is not None:
+            entry.save()
+
         extra = {
             'ip_address': entry.ip_address,
             'organization_id': entry.organization_id,
@@ -372,7 +379,7 @@ class OrganizationView(BaseView):
         return (args, kwargs)
 
     def get_allowed_roles(self, request, organization, member=None):
-        can_admin = request.access.has_scope('member:delete')
+        can_admin = request.access.has_scope('member:admin')
 
         allowed_roles = []
         if can_admin and not request.is_superuser():
@@ -460,6 +467,7 @@ class ProjectView(TeamView):
     def get_context_data(self, request, organization, team, project, **kwargs):
         context = super(ProjectView, self).get_context_data(request, organization, team)
         context['project'] = project
+        context['processing_issues'] = serialize(project).get('processingIssues', 0)
         return context
 
     def has_permission(self, request, organization, team, project, *args, **kwargs):

@@ -31,18 +31,32 @@ socket.setdefaulttimeout(5)
 def env(key, default='', type=None):
     "Extract an environment variable for use in configuration"
 
-    if 'SENTRY_RUNNING_UWSGI' in os.environ:
-        # We do this so when the process forks off into uwsgi
-        # we want to actually be popping off values. This is so that
-        # at runtime, the variables aren't actually available.
-        fn = os.environ.pop
-    else:
-        fn = os.environ.get
+    # First check an internal cache, so we can `pop` multiple times
+    # without actually losing the value.
+    try:
+        rv = env._cache[key]
+    except KeyError:
+        if 'SENTRY_RUNNING_UWSGI' in os.environ:
+            # We do this so when the process forks off into uwsgi
+            # we want to actually be popping off values. This is so that
+            # at runtime, the variables aren't actually available.
+            fn = os.environ.pop
+        else:
+            fn = os.environ.__getitem__
+
+        try:
+            rv = fn(key)
+            env._cache[key] = rv
+        except KeyError:
+            rv = default
 
     if type is None:
         type = type_from_value(default)
 
-    return type(fn(key, default))
+    return type(rv)
+
+
+env._cache = {}
 
 
 DEBUG = False
@@ -269,6 +283,8 @@ INSTALLED_APPS = (
     'raven.contrib.django.raven_compat',
     'rest_framework',
     'sentry',
+    'sentry.analytics',
+    'sentry.analytics.events',
     'sentry.nodestore',
     'sentry.search',
     'sentry.lang.javascript',
@@ -279,9 +295,12 @@ INSTALLED_APPS = (
     'sentry.plugins.sentry_useragents',
     'sentry.plugins.sentry_webhooks',
     'social_auth',
-    'south',
     'sudo',
 )
+
+import django
+if django.VERSION < (1, 7):
+    INSTALLED_APPS += ('south',)
 
 STATIC_ROOT = os.path.realpath(os.path.join(PROJECT_ROOT, 'static'))
 STATIC_URL = '/_static/{version}/'
@@ -328,6 +347,12 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'sentry.auth.password_validation.MinimumLengthValidator',
         'OPTIONS': {
             'min_length': 6,
+        },
+    },
+    {
+        'NAME': 'sentry.auth.password_validation.MaximumLengthValidator',
+        'OPTIONS': {
+            'max_length': 256,
         },
     },
 ]
@@ -425,6 +450,7 @@ CELERY_IMPORTS = (
     'sentry.tasks.check_auth',
     'sentry.tasks.clear_expired_snoozes',
     'sentry.tasks.collect_project_platforms',
+    'sentry.tasks.commits',
     'sentry.tasks.deletion',
     'sentry.tasks.digests',
     'sentry.tasks.dsymcache',
@@ -435,18 +461,26 @@ CELERY_IMPORTS = (
     'sentry.tasks.post_process',
     'sentry.tasks.process_buffer',
     'sentry.tasks.reports',
+    'sentry.tasks.reprocessing',
     'sentry.tasks.store',
+    'sentry.tasks.unmerge',
 )
 CELERY_QUEUES = [
     Queue('alerts', routing_key='alerts'),
     Queue('auth', routing_key='auth'),
+    Queue('commits', routing_key='commits'),
     Queue('cleanup', routing_key='cleanup'),
     Queue('default', routing_key='default'),
     Queue('digests.delivery', routing_key='digests.delivery'),
     Queue('digests.scheduling', routing_key='digests.scheduling'),
     Queue('email', routing_key='email'),
     Queue('events.preprocess_event', routing_key='events.preprocess_event'),
+    Queue('events.reprocessing.preprocess_event',
+          routing_key='events.reprocessing.preprocess_event'),
     Queue('events.process_event', routing_key='events.process_event'),
+    Queue('events.reprocessing.process_event',
+          routing_key='events.reprocessing.process_event'),
+    Queue('events.reprocess_events', routing_key='events.reprocess_events'),
     Queue('events.save_event', routing_key='events.save_event'),
     Queue('merge', routing_key='merge'),
     Queue('options', routing_key='options'),
@@ -454,6 +488,7 @@ CELERY_QUEUES = [
     Queue('reports.prepare', routing_key='reports.prepare'),
     Queue('search', routing_key='search'),
     Queue('stats', routing_key='stats'),
+    Queue('unmerge', routing_key='unmerge'),
     Queue('update', routing_key='update'),
 ]
 
@@ -530,6 +565,13 @@ CELERYBEAT_SCHEDULE = {
             'expires': 300,
         },
     },
+    'clear-expired-raw-events': {
+        'task': 'sentry.tasks.clear_expired_raw_events',
+        'schedule': timedelta(minutes=15),
+        'options': {
+            'expires': 300,
+        },
+    },
     # Disabled for the time being:
     # 'clear-old-cached-dsyms': {
     #     'task': 'sentry.tasks.clear_old_cached_dsyms',
@@ -579,7 +621,7 @@ LOGGING = {
     'disable_existing_loggers': True,
     'handlers': {
         'null': {
-            'class': 'django.utils.log.NullHandler',
+            'class': 'logging.NullHandler',
         },
         'console': {
             'class': 'sentry.logging.handlers.StructLogHandler',
@@ -608,6 +650,11 @@ LOGGING = {
         },
         'sentry': {
             'level': 'INFO',
+        },
+        # This only needs to go to Sentry for now.
+        'sentry.similarity': {
+            'handlers': ['internal'],
+            'propagate': False,
         },
         'sentry.errors': {
             'handlers': ['console'],
@@ -697,15 +744,14 @@ SENTRY_FEATURES = {
     'auth:register': True,
     'organizations:api-keys': False,
     'organizations:create': True,
-    'organizations:repos': False,
     'organizations:sso': True,
-    'organizations:callsigns': False,
-    'organizations:release-commits': False,
+    'organizations:callsigns': True,
     'projects:global-events': False,
     'projects:plugins': True,
     'projects:dsym': False,
     'projects:sample-events': True,
-    'workflow:release-emails': False,
+    'projects:data-forwarding': True,
+    'projects:rate-limits': True,
 }
 
 # Default time zone for localization in the UI.
@@ -811,6 +857,10 @@ SENTRY_FILESTORE_ALIASES = {
     's3': 'sentry.filestore.s3.S3Boto3Storage',
 }
 
+SENTRY_ANALYTICS_ALIASES = {
+    'noop': 'sentry.analytics.Analytics',
+}
+
 # set of backends that do not support needing SMTP mail.* settings
 # This list is a bit fragile and hardcoded, but it's unlikely that
 # a user will be using a different backend that also mandates SMTP
@@ -890,6 +940,9 @@ SENTRY_SEARCH_OPTIONS = {}
 SENTRY_TSDB = 'sentry.tsdb.dummy.DummyTSDB'
 SENTRY_TSDB_OPTIONS = {}
 
+SENTRY_NEWSLETTER = 'sentry.newsletter.base.Newsletter'
+SENTRY_NEWSLETTER_OPTIONS = {}
+
 # rollups must be ordered from highest granularity to lowest
 SENTRY_TSDB_ROLLUPS = (
     # (time in seconds, samples to keep)
@@ -952,21 +1005,52 @@ SENTRY_MANAGED_USER_FIELDS = ()
 SENTRY_SCOPES = set([
     'org:read',
     'org:write',
-    'org:delete',
+    'org:admin',
     'member:read',
     'member:write',
-    'member:delete',
+    'member:admin',
     'team:read',
     'team:write',
-    'team:delete',
+    'team:admin',
     'project:read',
     'project:write',
-    'project:delete',
+    'project:admin',
     'project:releases',
     'event:read',
     'event:write',
-    'event:delete',
+    'event:admin',
 ])
+
+SENTRY_SCOPE_SETS = (
+    (
+        ('org:admin', 'Read, write, and admin access to organization details.'),
+        ('org:write', 'Read and write access to organization details.'),
+        ('org:read', 'Read access to organization details.'),
+    ),
+    (
+        ('member:admin', 'Read, write, and admin access to organization members.'),
+        ('member:write', 'Read and write access to organization members.'),
+        ('member:read', 'Read access to organization members.'),
+    ),
+    (
+        ('team:admin', 'Read, write, and admin access to teams.'),
+        ('team:write', 'Read and write access to teams.'),
+        ('team:read', 'Read access to teams.'),
+    ),
+    (
+        ('project:admin', 'Read, write, and admin access to projects.'),
+        ('project:write', 'Read and write access to projects.'),
+        ('project:read', 'Read access to projects.'),
+    ),
+    (
+        ('project:releases', 'Read, write, and admin access to project releases.'),
+    ),
+    (
+        ('event:admin', 'Read, write, and admin access to events.'),
+        ('event:write', 'Read and write access to events.'),
+        ('event:read', 'Read access to events.'),
+    ),
+)
 
 SENTRY_DEFAULT_ROLE = 'member'
 
@@ -980,7 +1064,7 @@ SENTRY_ROLES = (
         'name': 'Member',
         'desc': 'Members can view and act on events, as well as view most other data within the organization.',
         'scopes': set([
-            'event:read', 'event:write', 'event:delete', 'project:releases',
+            'event:read', 'event:write', 'event:admin', 'project:releases',
             'project:read', 'org:read', 'member:read', 'team:read',
         ]),
     },
@@ -989,10 +1073,10 @@ SENTRY_ROLES = (
         'name': 'Admin',
         'desc': 'Admin privileges on any teams of which they\'re a member. They can create new teams and projects, as well as remove teams and projects which they already hold membership on.',
         'scopes': set([
-            'event:read', 'event:write', 'event:delete',
+            'event:read', 'event:write', 'event:admin',
             'org:read', 'member:read',
-            'project:read', 'project:write', 'project:delete', 'project:releases',
-            'team:read', 'team:write', 'team:delete',
+            'project:read', 'project:write', 'project:admin', 'project:releases',
+            'team:read', 'team:write', 'team:admin',
         ]),
     },
     {
@@ -1001,10 +1085,10 @@ SENTRY_ROLES = (
         'desc': 'Gains admin access on all teams as well as the ability to add and remove members.',
         'is_global': True,
         'scopes': set([
-            'event:read', 'event:write', 'event:delete',
-            'member:read', 'member:write', 'member:delete',
-            'project:read', 'project:write', 'project:delete', 'project:releases',
-            'team:read', 'team:write', 'team:delete',
+            'event:read', 'event:write', 'event:admin',
+            'member:read', 'member:write', 'member:admin',
+            'project:read', 'project:write', 'project:admin', 'project:releases',
+            'team:read', 'team:write', 'team:admin',
             'org:read', 'org:write',
         ]),
     },
@@ -1014,11 +1098,11 @@ SENTRY_ROLES = (
         'desc': 'Gains full permission across the organization. Can manage members as well as perform catastrophic operations such as removing the organization.',
         'is_global': True,
         'scopes': set([
-            'org:read', 'org:write', 'org:delete',
-            'member:read', 'member:write', 'member:delete',
-            'team:read', 'team:write', 'team:delete',
-            'project:read', 'project:write', 'project:delete', 'project:releases',
-            'event:read', 'event:write', 'event:delete',
+            'org:read', 'org:write', 'org:admin',
+            'member:read', 'member:write', 'member:admin',
+            'team:read', 'team:write', 'team:admin',
+            'project:read', 'project:write', 'project:admin', 'project:releases',
+            'event:read', 'event:write', 'event:admin',
         ]),
     },
 )
@@ -1030,6 +1114,15 @@ SENTRY_DEFAULT_OPTIONS = {}
 # You should not change this setting after your database has been created
 # unless you have altered all schemas first
 SENTRY_USE_BIG_INTS = False
+
+# Encryption schemes available to Sentry. You should *never* remove from this
+# list until the key is no longer used in the database. The first listed
+# implementation is considered the default and will be used to encrypt all
+# values (as well as re-encrypt data when it's re-saved).
+SENTRY_ENCRYPTION_SCHEMES = (
+    # identifier: implementation
+    # ('0', Fernet(b'super secret key probably from Fernet.generate_key()')),
+)
 
 # Delay (in ms) to induce on API responses
 SENTRY_API_RESPONSE_DELAY = 0
@@ -1044,6 +1137,9 @@ SENTRY_WATCHERS = (
 
 # Max file size for avatar photo uploads
 SENTRY_MAX_AVATAR_SIZE = 5000000
+
+# The maximum age of raw events before they are deleted
+SENTRY_RAW_EVENT_MAX_AGE_DAYS = 10
 
 # statuspage.io support
 STATUS_PAGE_ID = None
@@ -1086,22 +1182,39 @@ SUDO_URL = 'sentry-sudo'
 
 # TODO(dcramer): move this to sentry.io so it can be automated
 SDK_VERSIONS = {
-    'raven-js': '3.9.1',
-    'raven-python': '5.32.0',
-    'sentry-laravel': '0.5.0',
-    'sentry-php': '1.6.0',
+    'raven-java': '8.0.0',
+    'raven-js': '3.15.0',
+    'raven-node': '1.1.4',
+    'raven-python': '6.0.0',
+    'raven-ruby': '2.4.0',
+    'sentry-laravel': '0.6.1',
+    'sentry-php': '1.6.2',
+    'sentry-swift': '2.1.2',
 }
 
 SDK_URLS = {
+    'raven-java': 'https://docs.sentry.io/clients/java/',
+    'raven-java:android': 'https://docs.sentry.io/clients/java/modules/android/',
+    'raven-java:log4j': 'https://docs.sentry.io/clients/java/modules/log4j/',
+    'raven-java:log4j2': 'https://docs.sentry.io/clients/java/modules/log4j2/',
+    'raven-java:logback': 'https://docs.sentry.io/clients/java/modules/logback/',
     'raven-js': 'https://docs.sentry.io/clients/javascript/',
+    'raven-node': 'https://docs.sentry.io/clients/node/',
     'raven-python': 'https://docs.sentry.io/clients/python/',
+    'raven-ruby': 'https://docs.sentry.io/clients/ruby/',
     'raven-swift': 'https://docs.sentry.io/clients/cocoa/',
     'sentry-php': 'https://docs.sentry.io/clients/php/',
     'sentry-laravel': 'https://docs.sentry.io/clients/php/integrations/laravel/',
+    'sentry-swift': 'https://docs.sentry.io/clients/cocoa/',
 }
 
 DEPRECATED_SDKS = {
     # sdk name => new sdk name
     'raven-objc': 'sentry-swift',
     'raven-php': 'sentry-php',
+    'sentry-android': 'raven-java',
+    # The Ruby SDK used to go by the name 'sentry-raven'...
+    'sentry-raven': 'raven-ruby',
 }
+
+SOUTH_TESTS_MIGRATE = os.environ.get('SOUTH_TESTS_MIGRATE', '0') == '1'

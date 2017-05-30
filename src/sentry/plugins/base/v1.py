@@ -18,6 +18,7 @@ from threading import local
 
 from sentry.auth import access
 from sentry.plugins.config import PluginConfigMixin
+from sentry.plugins.status import PluginStatusMixin
 from sentry.plugins.base.response import Response
 from sentry.plugins.base.view import PluggableViewMixin
 from sentry.plugins.base.configuration import (
@@ -40,7 +41,7 @@ class PluginMount(type):
         return new_cls
 
 
-class IPlugin(local, PluggableViewMixin, PluginConfigMixin):
+class IPlugin(local, PluggableViewMixin, PluginConfigMixin, PluginStatusMixin):
     """
     Plugin interface. Should not be inherited from directly.
 
@@ -228,6 +229,12 @@ class IPlugin(local, PluggableViewMixin, PluginConfigMixin):
     def has_project_conf(self):
         return self.project_conf_form is not None
 
+    def has_plugin_conf(self):
+        """
+        Checks if the plugin should be returned in the ProjectPluginsEndpoint
+        """
+        return self.has_project_conf()
+
     def can_enable_for_projects(self):
         """
         Returns a boolean describing whether this plugin can be enabled for
@@ -320,7 +327,7 @@ class IPlugin(local, PluggableViewMixin, PluginConfigMixin):
             'group': group,
             'event': event,
             'can_admin_event': request.access.has_scope('event:write'),
-            'can_remove_event': request.access.has_scope('event:delete'),
+            'can_remove_event': request.access.has_scope('event:admin'),
         })
 
     def view(self, request, group, **kwargs):

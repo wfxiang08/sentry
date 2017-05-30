@@ -18,7 +18,7 @@ DEFAULT_SETTINGS_OVERRIDE = 'sentry.conf.py'
 
 def generate_secret_key():
     from django.utils.crypto import get_random_string
-    chars = u'abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*(-_=+)'
+    chars = u'abcdefghijklmnopqrstuvwxyz0123456789!@#%^&*(-_=+)'
     return get_random_string(50, chars)
 
 
@@ -89,7 +89,7 @@ def discover_configs():
     )
 
 
-def configure(ctx, py, yaml, skip_backend_validation=False):
+def configure(ctx, py, yaml, skip_service_validation=False):
     """
     Given the two different config files, set up the environment.
 
@@ -132,15 +132,9 @@ def configure(ctx, py, yaml, skip_backend_validation=False):
         raise ValueError("Configuration file does not exist at '%s'" % click.format_filename(yaml))
 
     # Add autoreload for config.yml file if needed
-    if 'UWSGI_PY_AUTORELOAD' in os.environ:
-        if yaml is not None and os.path.exists(yaml):
-            try:
-                import uwsgi
-                from uwsgidecorators import filemon
-            except ImportError:
-                pass
-            else:
-                filemon(yaml)(uwsgi.reload)
+    if yaml is not None and os.path.exists(yaml):
+        from sentry.utils.uwsgi import reload_on_change
+        reload_on_change(yaml)
 
     os.environ['DJANGO_SETTINGS_MODULE'] = 'sentry_config'
 
@@ -156,7 +150,7 @@ def configure(ctx, py, yaml, skip_backend_validation=False):
         'config_path': py,
         'settings': settings,
         'options': yaml,
-    }, skip_backend_validation=skip_backend_validation)
+    }, skip_service_validation=skip_service_validation)
     on_configure({'settings': settings})
 
     __installed = True

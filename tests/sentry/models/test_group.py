@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from sentry.models import (
     Group, GroupRedirect, GroupSnooze, GroupStatus, Release,
-    get_group_with_redirect
+    get_group_with_redirect, GroupTagValue
 )
 from sentry.testutils import TestCase
 
@@ -154,3 +154,77 @@ class GroupTest(TestCase):
     def test_invalid_shared_id(self):
         with pytest.raises(Group.DoesNotExist):
             Group.from_share_id('adc7a5b902184ce3818046302e94f8ec')
+
+    def test_qualified_share_id(self):
+        project = self.create_project(name='foo bar')
+        group = self.create_group(project=project, short_id=project.next_short_id())
+        short_id = group.qualified_short_id
+
+        assert short_id.startswith('FOO-BAR-')
+
+        group2 = Group.objects.by_qualified_short_id(group.organization.id, short_id)
+
+        assert group2 == group
+
+    def test_first_last_release(self):
+        project = self.create_project()
+        release = Release.objects.create(
+            version='a',
+            organization_id=project.organization_id,
+        )
+        release.add_project(project)
+
+        group = self.create_group(
+            project=project,
+            first_release=release,
+        )
+
+        GroupTagValue.objects.create(
+            project_id=project.id,
+            group_id=group.id,
+            key='sentry:release',
+            value=release.version
+        )
+
+        assert group.first_release == release
+        assert group.get_first_release() == release.version
+        assert group.get_last_release() == release.version
+
+    def test_first_release_from_tag(self):
+        project = self.create_project()
+        release = Release.objects.create(
+            version='a',
+            organization_id=project.organization_id,
+        )
+        release.add_project(project)
+
+        group = self.create_group(
+            project=project,
+        )
+
+        GroupTagValue.objects.create(
+            project_id=project.id,
+            group_id=group.id,
+            key='sentry:release',
+            value=release.version
+        )
+
+        assert group.first_release is None
+        assert group.get_first_release() == release.version
+        assert group.get_last_release() == release.version
+
+    def test_first_last_release_miss(self):
+        project = self.create_project()
+        release = Release.objects.create(
+            version='a',
+            organization_id=project.organization_id,
+        )
+        release.add_project(project)
+
+        group = self.create_group(
+            project=project,
+        )
+
+        assert group.first_release is None
+        assert group.get_first_release() is None
+        assert group.get_last_release() is None

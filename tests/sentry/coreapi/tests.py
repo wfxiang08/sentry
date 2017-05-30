@@ -4,8 +4,10 @@ from __future__ import absolute_import
 
 import six
 import mock
+import pytest
 
 from datetime import datetime
+from django.core.exceptions import SuspiciousOperation
 from uuid import UUID
 
 from sentry.coreapi import (
@@ -30,18 +32,21 @@ class AuthFromRequestTest(BaseAPITest):
     def test_valid(self):
         request = mock.Mock()
         request.META = {'HTTP_X_SENTRY_AUTH': 'Sentry sentry_key=value, biz=baz'}
+        request.GET = {}
         result = self.helper.auth_from_request(request)
         assert result.public_key == 'value'
 
     def test_valid_missing_space(self):
         request = mock.Mock()
         request.META = {'HTTP_X_SENTRY_AUTH': 'Sentry sentry_key=value,biz=baz'}
+        request.GET = {}
         result = self.helper.auth_from_request(request)
         assert result.public_key == 'value'
 
     def test_valid_ignore_case(self):
         request = mock.Mock()
         request.META = {'HTTP_X_SENTRY_AUTH': 'SeNtRy sentry_key=value, biz=baz'}
+        request.GET = {}
         result = self.helper.auth_from_request(request)
         assert result.public_key == 'value'
 
@@ -69,13 +74,22 @@ class AuthFromRequestTest(BaseAPITest):
     def test_invalid_header_missing_pair(self):
         request = mock.Mock()
         request.META = {'HTTP_X_SENTRY_AUTH': 'Sentry foo'}
+        request.GET = {}
         with self.assertRaises(APIUnauthorized):
             self.helper.auth_from_request(request)
 
     def test_invalid_malformed_value(self):
         request = mock.Mock()
         request.META = {'HTTP_X_SENTRY_AUTH': 'Sentry sentry_key=value,,biz=baz'}
+        request.GET = {}
         with self.assertRaises(APIUnauthorized):
+            self.helper.auth_from_request(request)
+
+    def test_multiple_auth_suspicious(self):
+        request = mock.Mock()
+        request.GET = {'sentry_version': '1', 'foo': 'bar'}
+        request.META = {'HTTP_X_SENTRY_AUTH': 'Sentry sentry_key=value, biz=baz'}
+        with pytest.raises(SuspiciousOperation):
             self.helper.auth_from_request(request)
 
 
@@ -354,6 +368,49 @@ class ValidateDataTest(BaseAPITest):
             'release': 42,
         })
         assert data.get('release') == '42'
+
+    def test_distribution_too_long(self):
+        data = self.helper.validate_data(self.project, {
+            'release': 'a' * 62,
+            'dist': 'b' * 65,
+        })
+        assert not data.get('dist')
+        assert len(data['errors']) == 1
+        assert data['errors'][0]['type'] == 'value_too_long'
+        assert data['errors'][0]['name'] == 'dist'
+        assert data['errors'][0]['value'] == 'b' * 65
+
+    def test_distribution_bad_char(self):
+        data = self.helper.validate_data(self.project, {
+            'release': 'a' * 62,
+            'dist': '^%',
+        })
+        assert not data.get('dist')
+        assert len(data['errors']) == 1
+        assert data['errors'][0]['type'] == 'invalid_data'
+        assert data['errors'][0]['name'] == 'dist'
+        assert data['errors'][0]['value'] == '^%'
+
+    def test_distribution_strip(self):
+        data = self.helper.validate_data(self.project, {
+            'release': 'a' * 62,
+            'dist': ' foo ',
+        })
+        assert data.get('dist') == 'foo'
+
+    def test_distribution_as_non_string(self):
+        data = self.helper.validate_data(self.project, {
+            'release': '42',
+            'dist': 23,
+        })
+        assert data.get('release') == '42'
+        assert data.get('dist') == '23'
+
+    def test_distribution_no_release(self):
+        data = self.helper.validate_data(self.project, {
+            'dist': 23,
+        })
+        assert data.get('dist') is None
 
     def test_valid_platform(self):
         data = self.helper.validate_data(self.project, {

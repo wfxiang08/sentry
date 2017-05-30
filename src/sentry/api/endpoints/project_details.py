@@ -16,7 +16,7 @@ from sentry.api.decorators import sudo_required
 from sentry.api.serializers import serialize
 from sentry.api.serializers.models.plugin import PluginSerializer
 from sentry.api.serializers.rest_framework import DictField
-from sentry.app import digests
+from sentry.digests import backend as digests
 from sentry.models import (
     AuditLogEntryEvent, Group, GroupStatus, OrganizationMemberTeam, Project,
     ProjectBookmark, ProjectStatus, Team, UserOption, DEFAULT_SUBJECT_TEMPLATE
@@ -153,11 +153,11 @@ class ProjectAdminSerializer(serializers.Serializer):
 
 class RelaxedProjectPermission(ProjectPermission):
     scope_map = {
-        'GET': ['project:read', 'project:write', 'project:delete'],
-        'POST': ['project:write', 'project:delete'],
+        'GET': ['project:read', 'project:write', 'project:admin'],
+        'POST': ['project:write', 'project:admin'],
         # PUT checks for permissions based on fields
-        'PUT': ['project:read', 'project:write', 'project:delete'],
-        'DELETE': ['project:delete'],
+        'PUT': ['project:read', 'project:write', 'project:admin'],
+        'DELETE': ['project:admin'],
     }
 
 
@@ -190,10 +190,12 @@ class ProjectDetailsEndpoint(ProjectEndpoint):
             'sentry:csp_ignored_sources_defaults': bool(project.get_option('sentry:csp_ignored_sources_defaults', True)),
             'sentry:csp_ignored_sources': '\n'.join(project.get_option('sentry:csp_ignored_sources', []) or []),
             'sentry:default_environment': project.get_option('sentry:default_environment'),
+            'sentry:reprocessing_active': bool(project.get_option('sentry:reprocessing_active', False)),
             'mail:subject_prefix': project.get_option('mail:subject_prefix'),
             'sentry:scrub_ip_address': project.get_option('sentry:scrub_ip_address', False),
             'sentry:blacklisted_ips': '\n'.join(project.get_option('sentry:blacklisted_ips', [])),
             'feedback:branding': project.get_option('feedback:branding', '1') == '1',
+            'sentry:verify_ssl': bool(project.get_option('sentry:verify_ssl', False)),
         }
 
     @attach_scenarios([get_project_scenario])
@@ -328,9 +330,19 @@ class ProjectDetailsEndpoint(ProjectEndpoint):
             project.update_option('mail:subject_template', result['subjectTemplate'])
 
         if result.get('isSubscribed'):
-            UserOption.objects.set_value(request.user, project, 'mail:alert', 1)
+            UserOption.objects.set_value(
+                user=request.user,
+                key='mail:alert',
+                value=1,
+                project=project
+            )
         elif result.get('isSubscribed') is False:
-            UserOption.objects.set_value(request.user, project, 'mail:alert', 0)
+            UserOption.objects.set_value(
+                user=request.user,
+                key='mail:alert',
+                value=0,
+                project=project
+            )
 
         if result.get('securityToken'):
             project.update_option('sentry:token', result['securityToken'])
@@ -406,6 +418,18 @@ class ProjectDetailsEndpoint(ProjectEndpoint):
                 project.update_option(
                     'feedback:branding',
                     '1' if options['feedback:branding'] else '0',
+                )
+            if 'sentry:reprocessing_active' in options:
+                project.update_option('sentry:reprocessing_active',
+                    bool(options['sentry:reprocessing_active']))
+            if 'filters:blacklisted_ips' in options:
+                project.update_option(
+                    'sentry:blacklisted_ips',
+                    clean_newline_inputs(options['filters:blacklisted_ips']))
+            if 'sentry:verify_ssl' in options:
+                project.update_option(
+                    'sentry:verify_ssl',
+                    bool(options['sentry:verify_ssl']),
                 )
 
             self.create_audit_entry(

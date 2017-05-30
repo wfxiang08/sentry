@@ -2,7 +2,13 @@ from __future__ import absolute_import
 
 import six
 
-from django.http import HttpResponse, CompatibleStreamingHttpResponse
+try:
+    from django.http import (
+        HttpResponse,
+        CompatibleStreamingHttpResponse as StreamingHttpResponse
+    )
+except ImportError:
+    from django.http import HttpResponse, StreamingHttpResponse
 
 from sentry.api.base import Endpoint
 from sentry.api.bases.group import GroupPermission
@@ -40,10 +46,8 @@ class EventAppleCrashReportEndpoint(Endpoint):
                 'message': 'Only cocoa events can return an apple crash report',
             }, status=403)
 
-        threads = event.data.get(
-            'sentry.interfaces.threads',
-            event.data.get('threads'
-        )).get('values')
+        threads = (event.data.get('threads') or {}).get('values')
+        exception = (event.data.get('sentry.interfaces.Exception') or {}).get('values')
 
         symbolicated = (request.GET.get('minified') not in ('1', 'true'))
         debug_images = None
@@ -55,7 +59,8 @@ class EventAppleCrashReportEndpoint(Endpoint):
             threads=threads,
             context=event.data.get('contexts'),
             debug_images=debug_images,
-            symbolicated=symbolicated
+            symbolicated=symbolicated,
+            exception=exception
         ))
 
         response = HttpResponse(apple_crash_report_string, content_type='text/plain')
@@ -65,7 +70,7 @@ class EventAppleCrashReportEndpoint(Endpoint):
                 event.event_id,
                 symbolicated and '-symbolicated' or ''
             )
-            response = CompatibleStreamingHttpResponse(
+            response = StreamingHttpResponse(
                 apple_crash_report_string,
                 content_type='text/plain',
             )

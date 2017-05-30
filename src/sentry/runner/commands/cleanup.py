@@ -38,8 +38,9 @@ def get_project(value):
 @click.option('--concurrency', type=int, default=1, show_default=True, help='The number of concurrent workers to run.')
 @click.option('--silent', '-q', default=False, is_flag=True, help='Run quietly. No output on success.')
 @click.option('--model', '-m', multiple=True)
+@click.option('--router', '-r', default=None, help='Database router')
 @configuration
-def cleanup(days, project, concurrency, silent, model):
+def cleanup(days, project, concurrency, silent, model, router):
     """Delete a portion of trailing data based on creation date.
 
     All data that is older than `--days` will be deleted.  The default for
@@ -48,19 +49,28 @@ def cleanup(days, project, concurrency, silent, model):
     done with the `--project` flag which accepts a project ID or a string
     with the form `org/project` where both are slugs.
     """
+    if concurrency < 1:
+        click.echo('Error: Minimum concurrency is 1', err=True)
+        raise click.Abort()
+
+    from threading import Thread
+    from django.db import router as db_router
     from sentry.app import nodestore
     from sentry.db.deletion import BulkDeleteQuery
     from sentry.models import (
-        Event, EventMapping, Group, GroupRuleStatus, GroupTagValue,
-        LostPasswordHash, TagValue, GroupEmailThread,
+        ApiGrant, ApiToken, Event, EventMapping, Group, GroupRuleStatus,
+        GroupTagValue, LostPasswordHash, TagValue, GroupEmailThread, FileBlob,
+        EventTag,
     )
 
     models = {m.lower() for m in model}
 
     def is_filtered(model):
+        if router is not None and db_router.db_for_write(model) != router:
+            return True
         if not models:
             return False
-        return model.lower() not in models
+        return model.__name__.lower() not in models
 
     # these models should be safe to delete without cascades, in order
     BULK_DELETES = (
@@ -68,6 +78,7 @@ def cleanup(days, project, concurrency, silent, model):
         (GroupTagValue, 'last_seen'),
         (TagValue, 'last_seen'),
         (GroupEmailThread, 'date'),
+        (EventTag, 'date_added'),
     )
 
     GENERIC_DELETES = (
@@ -76,15 +87,27 @@ def cleanup(days, project, concurrency, silent, model):
     )
 
     if not silent:
-        click.echo("Removing expired values for LostPasswordHash")
+        click.echo('Removing expired values for LostPasswordHash')
 
-    if is_filtered('LostPasswordHash'):
+    if is_filtered(LostPasswordHash):
         if not silent:
             click.echo('>> Skipping LostPasswordHash')
     else:
         LostPasswordHash.objects.filter(
             date_added__lte=timezone.now() - timedelta(hours=48)
         ).delete()
+
+    for model in [ApiGrant, ApiToken]:
+        if not silent:
+            click.echo('Removing expired values for {}'.format(model.__name__))
+
+        if is_filtered(model):
+            if not silent:
+                click.echo('>> Skipping {}'.format(model.__name__))
+        else:
+            model.objects.filter(
+                expires_at__lt=timezone.now()
+            ).delete()
 
     project_id = None
     if project:
@@ -96,9 +119,6 @@ def cleanup(days, project, concurrency, silent, model):
     else:
         if not silent:
             click.echo("Removing old NodeStore values")
-        if is_filtered('NodeStore'):
-            if not silent:
-                click.echo('>> Skipping NodeStore')
         else:
             cutoff = timezone.now() - timedelta(days=days)
             try:
@@ -113,7 +133,7 @@ def cleanup(days, project, concurrency, silent, model):
                 days=days,
                 project=project or '*',
             ))
-        if is_filtered(model.__name__):
+        if is_filtered(model):
             if not silent:
                 click.echo('>> Skipping %s' % model.__name__)
         else:
@@ -128,7 +148,7 @@ def cleanup(days, project, concurrency, silent, model):
     # won't need a reference to an event for nearly as long
     if not silent:
         click.echo("Removing expired values for EventMapping")
-    if is_filtered('EventMapping'):
+    if is_filtered(EventMapping):
         if not silent:
             click.echo('>> Skipping EventMapping')
     else:
@@ -137,13 +157,14 @@ def cleanup(days, project, concurrency, silent, model):
             dtfield='date_added',
             days=min(days, 7),
             project_id=project_id,
+            order_by='-date_added'
         ).execute()
 
     # Clean up FileBlob instances which are no longer used and aren't super
     # recent (as there could be a race between blob creation and reference)
     if not silent:
         click.echo("Cleaning up unused FileBlob references")
-    if is_filtered('FileBlob'):
+    if is_filtered(FileBlob):
         if not silent:
             click.echo('>> Skipping FileBlob')
     else:
@@ -156,16 +177,27 @@ def cleanup(days, project, concurrency, silent, model):
                 days=days,
                 project=project or '*',
             ))
-        if is_filtered(model.__name__):
+        if is_filtered(model):
             if not silent:
                 click.echo('>> Skipping %s' % model.__name__)
         else:
-            BulkDeleteQuery(
+            query = BulkDeleteQuery(
                 model=model,
                 dtfield=dtfield,
                 days=days,
                 project_id=project_id,
-            ).execute_generic()
+            )
+            if concurrency > 1:
+                threads = []
+                for shard_id in range(concurrency):
+                    t = Thread(target=lambda shard_id=shard_id: query.execute_sharded(concurrency, shard_id))
+                    t.start()
+                    threads.append(t)
+
+                for t in threads:
+                    t.join()
+            else:
+                query.execute_generic()
 
 
 def cleanup_unused_files(quiet=False):

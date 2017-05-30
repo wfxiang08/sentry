@@ -3,28 +3,36 @@ from sentry.runner import configure
 configure()
 
 import itertools
-import six
-
+import random
 from datetime import datetime, timedelta
-from django.conf import settings
-from django.db import IntegrityError, transaction
-from django.utils import timezone
 from hashlib import sha1
-from pytz import utc
 from random import randint
 from uuid import uuid4
 
-from sentry import roles
-from sentry.app import tsdb, buffer
+import six
+from django.conf import settings
+from django.db import IntegrityError, transaction
+from django.db.models import F
+from django.utils import timezone
+from loremipsum import Generator
+from pytz import utc
+
+from sentry import buffer, roles
 from sentry.models import (
-    Activity, Broadcast, File, GroupMeta, Organization, OrganizationAccessRequest,
-    OrganizationMember, Project, Release, ReleaseFile, Team, User, UserReport,
-    GroupRelease, Environment, ReleaseEnvironment, ReleaseCommit, Commit, Repository,
-    CommitAuthor, CommitFileChange,
+    Activity, Broadcast, Commit, CommitAuthor, CommitFileChange, Deploy,
+    Environment, File, GroupMeta, GroupRelease, Organization,
+    OrganizationAccessRequest, OrganizationMember, Project, Release,
+    ReleaseCommit, ReleaseEnvironment, ReleaseFile, Repository, Team, User,
+    UserReport
 )
 from sentry.signals import mocks_loaded
+from sentry.similarity import features
+from sentry.tsdb import backend as tsdb
 from sentry.utils.hashlib import md5_text
-from sentry.utils.samples import create_sample_event
+from sentry.utils.samples import create_sample_event as _create_sample_event
+from sentry.utils.samples import generate_user
+
+loremipsum = Generator()
 
 PLATFORMS = itertools.cycle([
     'ruby',
@@ -49,6 +57,46 @@ ENVIRONMENTS = itertools.cycle([
     'alpha',
     'beta',
 ])
+
+
+def make_sentence(words=None):
+    if words is None:
+        words = int(random.weibullvariate(8, 3))
+    return ' '.join(random.choice(loremipsum.words) for _ in range(words))
+
+
+def create_sample_event(*args, **kwargs):
+    event = _create_sample_event(*args, **kwargs)
+    features.record(event)
+    return event
+
+
+def generate_commits(user):
+    commits = []
+    for i in range(random.randint(0, 20)):
+        filename = random.choice(loremipsum.words)
+        if random.randint(0, 5) == 1:
+            author = (user.name, user.email)
+        else:
+            author = (
+                '{} {}'.format(
+                    random.choice(loremipsum.words),
+                    random.choice(loremipsum.words),
+                ),
+                '{}@example.com'.format(
+                    random.choice(loremipsum.words),
+                ),
+            )
+
+        commits.append({
+            'key': sha1(uuid4().hex).hexdigest(),
+            'message': 'modified {}.js}',
+            'author': author,
+            'files': [
+                (filename, 'M'),
+            ],
+        })
+    return commits
 
 
 def create_system_time_series():
@@ -87,6 +135,8 @@ def create_sample_time_series(event, release=None):
     group = event.group
     project = group.project
 
+    key = project.key_set.all()[0]
+
     now = datetime.utcnow().replace(tzinfo=utc)
 
     environment = Environment.get_or_create(
@@ -117,11 +167,14 @@ def create_sample_time_series(event, release=None):
         ), now, count)
         tsdb.incr_multi((
             (tsdb.models.organization_total_received, project.organization_id),
+            (tsdb.models.project_total_forwarded, project.id),
             (tsdb.models.project_total_received, project.id),
+            (tsdb.models.key_total_received, key.id),
         ), now, int(count * 1.1))
         tsdb.incr_multi((
             (tsdb.models.organization_total_rejected, project.organization_id),
             (tsdb.models.project_total_rejected, project.id),
+            (tsdb.models.key_total_rejected, key.id),
         ), now, int(count * 0.1))
 
         frequencies = [
@@ -161,12 +214,14 @@ def create_sample_time_series(event, release=None):
             (tsdb.models.group, group.id),
         ), now, count)
         tsdb.incr_multi((
-            (tsdb.models.organization_total_received, group.project.organization_id),
-            (tsdb.models.project_total_received, group.project.id),
+            (tsdb.models.organization_total_received, project.organization_id),
+            (tsdb.models.project_total_received, project.id),
+            (tsdb.models.key_total_received, key.id),
         ), now, int(count * 1.1))
         tsdb.incr_multi((
-            (tsdb.models.organization_total_rejected, group.project.organization_id),
-            (tsdb.models.project_total_rejected, group.project.id),
+            (tsdb.models.organization_total_rejected, project.organization_id),
+            (tsdb.models.project_total_rejected, project.id),
+            (tsdb.models.key_total_rejected, key.id),
         ), now, int(count * 0.1))
 
         frequencies = [
@@ -200,7 +255,7 @@ def create_sample_time_series(event, release=None):
         now = now - timedelta(hours=1)
 
 
-def main(num_events=1):
+def main(num_events=1, extra_events=False):
     user = User.objects.filter(is_superuser=True)[0]
 
     dummy_user, _ = User.objects.get_or_create(
@@ -225,6 +280,7 @@ def main(num_events=1):
 
     if settings.SENTRY_SINGLE_ORGANIZATION:
         org = Organization.get_default()
+        print('Mocking org {}'.format(org.name))
     else:
         print('Mocking org {}'.format('Default'))
         org, _ = Organization.objects.get_or_create(
@@ -262,11 +318,16 @@ def main(num_events=1):
                 defaults={
                     'organization': org,
                     'first_event': timezone.now(),
+                    'flags': Project.flags.has_releases,
                 }
             )
             if not project.first_event:
                 project.update(
                     first_event=project.date_added,
+                )
+            if not project.flags.has_releases:
+                project.update(
+                    flags=F('flags').bitor(Project.flags.has_releases),
                 )
 
             with transaction.atomic():
@@ -287,41 +348,16 @@ def main(num_events=1):
                         )
                     release.add_project(project)
 
-            raw_commits = [
-                {
-                    'key': '6fb7672bee9c469a8aa074f52ed72eddc939ae7d',
-                    'message': 'Fix widget for real this time\n\nTurns out the sprocket configuration was broken.',
-                    'author': (user.name, user.email),
-                    'files': [
-                        ('/static/js/widget.js', 'M'),
-                    ],
-                },
-                {
-                    'key': '98a0672968c19e3d7921def5d724cc977e85f527',
-                    'message': 'Added .gitignore',
-                    'author': ('Jane Doe', 'janedoe@example.com'),
-                    'files': [
-                        ('.gitignore', 'A'),
-                        ('.DS_Store', 'D')
-                    ],
-                },
-                {
-                    'key': '631cd9096bd9811a046a472bb0aa8b573e86e1f1',
-                    'message': 'Fix widget',
-                    'author': (user.name, user.email),
-                    'files': [
-                        ('/static/html/widget.html', 'M'),
-                        ('/static/js/widget.js', 'M'),
-                        ('.DS_Store', 'A'),
-                    ],
-                },
-            ]
+            raw_commits = generate_commits(user)
 
             repo = Repository.objects.get_or_create(
                 organization_id=org.id,
-                name='Example Repo',
                 provider='github',
                 external_id='example/example',
+                defaults={
+                    'name': 'Example Repo',
+                    'url': 'https://github.com/example/example',
+                }
             )
 
             for commit_index, raw_commit in enumerate(raw_commits):
@@ -332,8 +368,8 @@ def main(num_events=1):
                     defaults={
                         'author': CommitAuthor.objects.get_or_create(
                             organization_id=org.id,
-                            name=raw_commit['author'][0],
                             email=raw_commit['author'][1],
+                            defaults={'name': raw_commit['author'][0]}
                         )[0],
                         'message': raw_commit['message'],
                     },
@@ -360,7 +396,6 @@ def main(num_events=1):
                         type=file[1],
                     )
 
-
                 ReleaseCommit.objects.get_or_create(
                     organization_id=org.id,
                     release=release,
@@ -376,20 +411,44 @@ def main(num_events=1):
                 data={'version': release.version},
             )
 
-            # Add a bunch of additional dummy events to support pagination
-            last_event = None
-            for _ in range(45):
-                platform = PLATFORMS.next()
+            environment = Environment.get_or_create(
+                project=project,
+                name=ENVIRONMENTS.next()
+            )
 
-                last_event = create_sample_event(
-                    project=project,
-                    platform=platform,
-                    release=release.version,
-                    level=LEVELS.next(),
-                    environment=ENVIRONMENTS.next(),
-                    message='This is a mostly useless example %s exception' % platform,
-                    checksum=md5_text(platform + six.text_type(_)).hexdigest(),
-                )
+            deploy = Deploy.objects.create(
+                organization_id=project.organization_id,
+                release=release,
+                environment_id=environment.id,
+            )
+
+            Activity.objects.create(
+                type=Activity.DEPLOY,
+                project=project,
+                ident=release.version,
+                data={
+                    'version': release.version,
+                    'deploy_id': deploy.id,
+                    'environment': environment.name
+                },
+                datetime=deploy.date_finished,
+             )
+
+            # Add a bunch of additional dummy events to support pagination
+            if extra_events:
+                for _ in range(45):
+                    platform = PLATFORMS.next()
+
+                    create_sample_event(
+                        project=project,
+                        platform=platform,
+                        release=release.version,
+                        level=LEVELS.next(),
+                        environment=ENVIRONMENTS.next(),
+                        message='This is a mostly useless example %s exception' % platform,
+                        checksum=md5_text(platform + six.text_type(_)).hexdigest(),
+                        user=generate_user(),
+                    )
 
             for _ in range(num_events):
                 event1 = create_sample_event(
@@ -397,6 +456,7 @@ def main(num_events=1):
                     platform='python',
                     release=release.version,
                     environment=ENVIRONMENTS.next(),
+                    user=generate_user(),
                 )
 
                 event2 = create_sample_event(
@@ -408,6 +468,7 @@ def main(num_events=1):
                         'name': 'raven-js',
                         'version': '2.1.0',
                     },
+                    user=generate_user(),
                 )
 
                 event3 = create_sample_event(project, 'java')
@@ -417,6 +478,7 @@ def main(num_events=1):
                     platform='ruby',
                     release=release.version,
                     environment=ENVIRONMENTS.next(),
+                    user=generate_user(),
                 )
 
                 event5 = create_sample_event(
@@ -424,6 +486,7 @@ def main(num_events=1):
                     platform='cocoa',
                     release=release.version,
                     environment=ENVIRONMENTS.next(),
+                    user=generate_user(),
                 )
 
                 create_sample_event(
@@ -432,7 +495,31 @@ def main(num_events=1):
                     release=release.version,
                     environment=ENVIRONMENTS.next(),
                     message='This is a an example PHP event with an extremely long and annoying title\nIt also happens to contain some newlines in it,\nthus making it even more annoying.',
+                    user=generate_user(),
                 )
+
+                create_sample_event(
+                    project=project,
+                    platform='cocoa',
+                    sample_name='react-native',
+                    release=release.version,
+                    environment=ENVIRONMENTS.next(),
+                    user=generate_user(),
+                )
+
+            Commit.objects.get_or_create(
+                organization_id=org.id,
+                repository_id=repo[0].id,
+                key=sha1(uuid4().hex).hexdigest(),
+                defaults={
+                    'author': CommitAuthor.objects.get_or_create(
+                        organization_id=org.id,
+                        email=user.email,
+                        defaults={'name': user.name}
+                    )[0],
+                    'message': 'Ooops!\nFixes {}'.format(event5.group.qualified_short_id),
+                },
+            )[0]
 
             create_sample_event(
                 project=project,
@@ -456,7 +543,7 @@ def main(num_events=1):
                 group=event3.group,
                 name='Jane Doe',
                 email='jane@example.com',
-                comments='I have no idea how I got here.',
+                comments=make_sentence(),
             )
 
             print('    > Loading time series data'.format(project_name))
@@ -496,11 +583,15 @@ if __name__ == '__main__':
 
     parser = OptionParser()
     parser.add_option('--events', dest='num_events', default=1, type=int)
+    parser.add_option('--extra-events', dest='extra_events', default=False, action='store_true')
 
     (options, args) = parser.parse_args()
 
     try:
-        main(num_events=options.num_events)
+        main(
+            num_events=options.num_events,
+            extra_events=options.extra_events,
+        )
     except Exception:
         # Avoid reporting any issues recursively back into Sentry
         import traceback

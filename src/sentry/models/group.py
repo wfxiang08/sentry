@@ -21,8 +21,7 @@ from django.db import models
 from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _
 
-from sentry import eventtypes
-from sentry.app import buffer
+from sentry import buffer, eventtypes
 from sentry.constants import (
     DEFAULT_LOGGER_NAME, EVENT_ORDERING_KEY, LOG_LEVELS, MAX_CULPRIT_LENGTH
 )
@@ -37,7 +36,7 @@ from sentry.utils.strings import strip, truncatechars
 
 logger = logging.getLogger(__name__)
 
-_short_id_re = re.compile(r'^(.*?)(?:[\s_-])([A-Za-z0-9-._]+)$')
+_short_id_re = re.compile(r'^(.*?)(?:[\s_-])([A-Za-z0-9]+)$')
 
 
 def looks_like_short_id(value):
@@ -83,7 +82,7 @@ def get_group_with_redirect(id, queryset=None):
 class GroupManager(BaseManager):
     use_for_related_fields = True
 
-    def by_qualified_short_id(self, org, short_id):
+    def by_qualified_short_id(self, organization_id, short_id):
         match = _short_id_re.match(short_id.strip())
         if match is None:
             raise Group.DoesNotExist()
@@ -99,7 +98,7 @@ class GroupManager(BaseManager):
         except ValueError:
             raise Group.DoesNotExist()
         return Group.objects.get(
-            project__organization=org,
+            project__organization=organization_id,
             project__slug=callsign,
             short_id=short_id,
         )
@@ -141,7 +140,7 @@ class GroupManager(BaseManager):
                 'key': key,
                 'value': value,
             }, {
-                'project': project_id,
+                'project_id': project_id,
                 'last_seen': date,
             })
 
@@ -379,6 +378,33 @@ class Group(Model):
             self._tag_cache = sorted(results, key=lambda x: x['label'])
 
         return self._tag_cache
+
+    def get_first_release(self):
+        from sentry.models import GroupTagValue
+        if self.first_release_id is None:
+            try:
+                first_release = GroupTagValue.objects.filter(
+                    group_id=self.id,
+                    key__in=('sentry:release', 'release'),
+                ).order_by('first_seen')[0]
+            except IndexError:
+                return None
+            else:
+                return first_release.value
+
+        return self.first_release.version
+
+    def get_last_release(self):
+        from sentry.models import GroupTagValue
+        try:
+            last_release = GroupTagValue.objects.filter(
+                group_id=self.id,
+                key__in=('sentry:release', 'release'),
+            ).order_by('-last_seen')[0]
+        except IndexError:
+            return None
+
+        return last_release.value
 
     def get_event_type(self):
         """

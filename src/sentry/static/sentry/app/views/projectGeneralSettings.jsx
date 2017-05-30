@@ -11,25 +11,27 @@ const FIELDS = {
     name: 'name',
     type: 'string',
     label: t('Project name'),
-    placeholder: 'e.g. My Service Name',
+    placeholder: 'e.g. My Service Name'
   },
   slug: {
     name: 'slug',
     type: 'string',
     label: t('Short name'),
-    help: t('A unique ID used to identify this project.'),
+    help: t('A unique ID used to identify this project.')
   },
   team: {
     name: 'team',
     type: 'choice',
     label: t('Team'),
-    choices: [],
+    choices: []
   },
   resolve_age: {
     name: 'resolve_age',
     type: 'range',
     label: t('Auto resolve'),
-    help: t('Automatically resolve an issue if it hasn\'t been seen for this amount of time.'),
+    help: t(
+      "Automatically resolve an issue if it hasn't been seen for this amount of time."
+    ),
     min: 0,
     max: 168,
     step: 1,
@@ -52,39 +54,49 @@ const FIELDS = {
       }
       return values;
     })(),
-    formatLabel: (val) => {
+    formatLabel: val => {
       val = parseInt(val, 10);
       if (val === 0) {
-          return 'Disabled';
+        return 'Disabled';
       } else if (val > 23 && val % 24 === 0) {
-          val = (val / 24);
-          return val + ' day' + (val != 1 ? 's' : '');
+        val = val / 24;
+        return val + ' day' + (val != 1 ? 's' : '');
       }
       return val + ' hour' + (val != 1 ? 's' : '');
     },
-    required: false,
+    required: false
   },
   securityToken: {
     name: 'securityToken',
     type: 'string',
     label: t('Security token'),
-    help: t('Outbound requests matching Allowed Domains will have the header "{token_header}: {token}" appended.'),
-    required: false,
+    help: t(
+      'Outbound requests matching Allowed Domains will have the header "{token_header}: {token}" appended.'
+    ),
+    required: false
   },
   securityTokenHeader: {
     name: 'securityTokenHeader',
     type: 'string',
     label: t('Security token header'),
-    help: t('Outbound requests matching Allowed Domains will have the header "{token_header}: {token}" appended.'),
+    help: t(
+      'Outbound requests matching Allowed Domains will have the header "{token_header}: {token}" appended.'
+    ),
     placeholder: 'X-Sentry-Token',
-    required: false,
+    required: false
+  },
+  'sentry:verify_ssl': {
+    name: 'verifyTLS',
+    type: 'bool',
+    label: t('Verify TLS/SSL'),
+    help: t('Outbound requests will verify TLS (sometimes known as SSL) connections.'),
+    required: false
   }
 };
 
-
 const ProjectGeneralSettings = React.createClass({
   propTypes: {
-    project: React.PropTypes.object.isRequired,
+    project: React.PropTypes.object.isRequired
   },
 
   mixins: [ApiMixin, ProjectState],
@@ -94,10 +106,10 @@ const ProjectGeneralSettings = React.createClass({
     let initialData = {
       name: project.name,
       slug: project.slug,
-      securityToken: project.securityToken,
+      securityToken: project.securityToken
     };
     let fields = {...FIELDS};
-    project.config.forEach((f) => {
+    project.config.forEach(f => {
       fields[f.name] = f;
       initialData[f.name] = project.options[f.name];
     });
@@ -109,14 +121,17 @@ const ProjectGeneralSettings = React.createClass({
       initialData: initialData,
       formData: {...initialData},
       fields: fields,
-      errors: {},
+      errors: {}
     };
   },
 
   componentWillReceiveProps(nextProps) {
     let location = this.props.location;
     let nextLocation = nextProps.location;
-    if (location.pathname != nextLocation.pathname || location.search != nextLocation.search) {
+    if (
+      location.pathname != nextLocation.pathname ||
+      location.search != nextLocation.search
+    ) {
       this.remountComponent();
     }
   },
@@ -129,10 +144,13 @@ const ProjectGeneralSettings = React.createClass({
     // upon changing a field, remove errors
     let errors = this.state.errors;
     delete errors[name];
-    this.setState({formData: {
-      ...this.state.formData,
-      [name]: value,
-    }, errors: errors});
+    this.setState({
+      formData: {
+        ...this.state.formData,
+        [name]: value
+      },
+      errors: errors
+    });
   },
 
   getEndpoint() {
@@ -146,7 +164,7 @@ const ProjectGeneralSettings = React.createClass({
       method: 'PUT',
       success: this.onSaveSuccess.bind(this, data => {
         let formData = {};
-        data.config.forEach((field) => {
+        data.config.forEach(field => {
           formData[field.name] = field.value || field.defaultValue;
         });
         this.setState({
@@ -157,7 +175,7 @@ const ProjectGeneralSettings = React.createClass({
       }),
       error: this.onSaveError.bind(this, error => {
         this.setState({
-          errors: (error.responseJSON || {}).errors || {},
+          errors: (error.responseJSON || {}).errors || {}
         });
       }),
       complete: this.onSaveComplete
@@ -177,12 +195,11 @@ const ProjectGeneralSettings = React.createClass({
     if (name === 'team') {
       field = {
         ...field,
-        choices: this.getOrganization().teams
-          .filter(o => o.isMember)
-          .map(o => [o.id, o.slug]),
+        choices: this.getOrganization()
+          .teams.filter(o => o.isMember)
+          .map(o => [o.id, o.slug])
       };
-      if (field.choices.length === 1)
-        return null;
+      if (field.choices.length === 1) return null;
     }
 
     return (
@@ -190,21 +207,21 @@ const ProjectGeneralSettings = React.createClass({
         config={field}
         formData={this.state.formData}
         formErrors={this.state.errors}
-        onChange={this.changeField.bind(this, field.name)} />
+        onChange={this.changeField.bind(this, field.name)}
+      />
     );
   },
 
   render() {
-    if (this.state.loading)
-      return this.renderLoading();
+    if (this.state.loading) return this.renderLoading();
 
     return (
       <div>
         <h2>{t('Project Settings')}</h2>
 
-          <form className="form-stacked">
-            <div className="box">
-              <div className="box-header">
+        <form className="form-stacked">
+          <div className="box">
+            <div className="box-header">
               <h3>{t('Project Details')}</h3>
             </div>
             <div className="box-content with-padding">
@@ -230,7 +247,13 @@ const ProjectGeneralSettings = React.createClass({
             <div className="box-content with-padding">
               {this.renderField('sentry:default_environment')}
               {this.renderField('resolve_age')}
-              <p><small><strong>Note: Enabling auto resolve will immediately resolve anything that has not been seen within this period of time. There is no undo!</strong></small></p>
+              <p>
+                <small>
+                  <strong>
+                    Note: Enabling auto resolve will immediately resolve anything that has not been seen within this period of time. There is no undo!
+                  </strong>
+                </small>
+              </p>
             </div>
           </div>
 
@@ -253,22 +276,35 @@ const ProjectGeneralSettings = React.createClass({
             </div>
             <div className="box-content with-padding">
 
-              <p>{tct('Configure origin URLs which Sentry should accept events from. This is used for communication with clients like [link].', {
-                link: <a href="https://github.com/getsentry/raven-js">raven-js</a>
-              })} {tct('This will restrict requests based on the [Origin] and [Referer] headers.', {
-                Origin: <code>Origin</code>,
-                Referer: <code>Referer</code>,
-              })}</p>
+              <p>
+                {tct(
+                  'Configure origin URLs which Sentry should accept events from. This is used for communication with clients like [link].',
+                  {
+                    link: <a href="https://github.com/getsentry/raven-js">raven-js</a>
+                  }
+                )}
+                {' '}
+                {tct(
+                  'This will restrict requests based on the [Origin] and [Referer] headers.',
+                  {
+                    Origin: <code>Origin</code>,
+                    Referer: <code>Referer</code>
+                  }
+                )}
+              </p>
               {this.renderField('sentry:origins')}
               {this.renderField('sentry:scrape_javascript')}
               {this.renderField('securityToken')}
               {this.renderField('securityTokenHeader')}
+              {this.renderField('sentry:verify_ssl')}
               {this.renderField('sentry:blacklisted_ips')}
             </div>
           </div>
 
           <div className="form-actions">
-            <button type="submit" className="btn btn-primary btn-lg">{t('Save Changes')}</button>
+            <button type="submit" className="btn btn-primary btn-lg">
+              {t('Save Changes')}
+            </button>
           </div>
         </form>
       </div>

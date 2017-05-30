@@ -3,6 +3,7 @@ import ReleaseStats from '../../components/releaseStats';
 import Count from '../../components/count';
 import TimeSince from '../../components/timeSince';
 import Version from '../../components/version';
+import LatestDeployOrReleaseTime from '../../components/latestDeployOrReleaseTime';
 
 const ReleaseList = React.createClass({
   propTypes: {
@@ -15,34 +16,40 @@ const ReleaseList = React.createClass({
     let {orgId, projectId} = this.props;
 
     return (
-      <ul className="release-list">
-          {this.props.releaseList.map((release) => {
-            return (
-              <li className="release" key={release.version}>
-                <div className="row">
-                  <div className="col-sm-6 col-xs-4">
-                    <h4><Version orgId={orgId} projectId={projectId} version={release.version} /></h4>
-                    <div className="release-meta">
-                      <span className="icon icon-clock"></span> <TimeSince date={release.dateCreated} />
-                    </div>
-                  </div>
-                  <div className="col-sm-2 col-xs-2">
-                    <ReleaseStats release={release}/>
-                  </div>
-                  <div className="col-sm-2 col-xs-3 release-stats stream-count">
-                    <Count className="release-count" value={release.newGroups} />
-                  </div>
-                  <div className="col-sm-2 col-xs-3 release-stats">
-                    {release.lastEvent ?
-                      <TimeSince date={release.lastEvent} />
-                    :
-                      <span>&mdash;</span>
-                    }
-                  </div>
+      <ul className="list-group list-group-lg">
+        {this.props.releaseList.map(release => {
+          return (
+            <li className="list-group-item" key={release.version}>
+              <div className="row row-center-vertically">
+                <div className="col-sm-4 col-xs-6">
+                  <h2>
+                    <Version
+                      orgId={orgId}
+                      projectId={projectId}
+                      version={release.version}
+                    />
+                  </h2>
+                  <LatestDeployOrReleaseTime
+                    orgId={orgId}
+                    releaseDateCreated={release.dateCreated}
+                    version={release.version}
+                  />
                 </div>
-              </li>
-            );
-          })}
+                <div className="col-sm-4 hidden-xs">
+                  <ReleaseStats release={release} />
+                </div>
+                <div className="col-sm-2 col-xs-3 text-big text-light">
+                  <Count className="release-count" value={release.newGroups} />
+                </div>
+                <div className="col-sm-2 col-xs-3 text-light">
+                  {release.lastEvent
+                    ? <TimeSince date={release.lastEvent} />
+                    : <span>—</span>}
+                </div>
+              </div>
+            </li>
+          );
+        })}
       </ul>
     );
   }

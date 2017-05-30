@@ -12,9 +12,11 @@ import logging
 
 from django.db.models import get_model
 
+from sentry import nodestore
 from sentry.constants import ObjectStatus
 from sentry.exceptions import DeleteAborted
 from sentry.signals import pending_delete
+from sentry.similarity import features
 from sentry.tasks.base import instrumented_task, retry
 from sentry.utils.query import bulk_delete_objects
 
@@ -27,8 +29,8 @@ logger = logging.getLogger('sentry.deletions.async')
 def delete_organization(object_id, transaction_id=None, continuous=True, **kwargs):
     from sentry.models import (
         Organization, OrganizationMember, OrganizationStatus, Team, TeamStatus,
-        Commit, CommitAuthor, CommitFileChange, Release, ReleaseCommit,
-        ReleaseFile, Repository
+        Commit, CommitAuthor, CommitFileChange, Environment, Release, ReleaseCommit,
+        ReleaseEnvironment, ReleaseFile, Distribution, ReleaseHeadCommit, Repository
     )
 
     try:
@@ -55,7 +57,8 @@ def delete_organization(object_id, transaction_id=None, continuous=True, **kwarg
 
     model_list = (
         OrganizationMember, CommitFileChange, Commit, CommitAuthor,
-        Repository, Release, ReleaseCommit, ReleaseFile
+        Environment, Repository, Release, ReleaseCommit,
+        ReleaseEnvironment, ReleaseFile, Distribution, ReleaseHeadCommit
     )
 
     has_more = delete_objects(
@@ -127,8 +130,8 @@ def delete_project(object_id, transaction_id=None, continuous=True, **kwargs):
         GroupEmailThread, GroupHash, GroupMeta, GroupRelease, GroupResolution,
         GroupRuleStatus, GroupSeen, GroupSubscription, GroupSnooze, GroupTagKey,
         GroupTagValue, Project, ProjectBookmark, ProjectKey, ProjectStatus,
-        ReleaseEnvironment, ReleaseProject, SavedSearchUserDefault, SavedSearch,
-        TagKey, TagValue, UserReport, Environment
+        ReleaseProject, SavedSearchUserDefault, SavedSearch,
+        TagKey, TagValue, UserReport, EnvironmentProject
     )
 
     try:
@@ -158,7 +161,7 @@ def delete_project(object_id, transaction_id=None, continuous=True, **kwargs):
         GroupEmailThread, GroupHash, GroupRelease, GroupRuleStatus, GroupSeen,
         GroupSubscription, GroupTagKey, GroupTagValue, ProjectBookmark,
         ProjectKey, TagKey, TagValue, SavedSearchUserDefault, SavedSearch,
-        UserReport, ReleaseEnvironment, Environment
+        UserReport, EnvironmentProject
     )
     for model in model_list:
         has_more = bulk_delete_objects(model, project_id=p.id, transaction_id=transaction_id, logger=logger)
@@ -219,9 +222,9 @@ def delete_project(object_id, transaction_id=None, continuous=True, **kwargs):
 @retry(exclude=(DeleteAborted,))
 def delete_group(object_id, transaction_id=None, continuous=True, **kwargs):
     from sentry.models import (
-        EventMapping, Group, GroupAssignee, GroupBookmark, GroupHash, GroupMeta,
-        GroupRelease, GroupResolution, GroupRuleStatus, GroupSnooze,
-        GroupSubscription, GroupStatus, GroupTagKey, GroupTagValue,
+        EventMapping, Group, GroupAssignee, GroupBookmark, GroupCommitResolution,
+        GroupHash, GroupMeta, GroupRelease, GroupResolution, GroupRuleStatus,
+        GroupSnooze, GroupSubscription, GroupStatus, GroupTagKey, GroupTagValue,
         GroupEmailThread, GroupRedirect, UserReport
     )
 
@@ -235,10 +238,10 @@ def delete_group(object_id, transaction_id=None, continuous=True, **kwargs):
 
     bulk_model_list = (
         # prioritize GroupHash
-        GroupHash, GroupAssignee, GroupBookmark, GroupMeta, GroupRelease,
-        GroupResolution, GroupRuleStatus, GroupSnooze, GroupTagValue,
-        GroupTagKey, EventMapping, GroupEmailThread, UserReport, GroupRedirect,
-        GroupSubscription,
+        GroupHash, GroupAssignee, GroupCommitResolution, GroupBookmark,
+        GroupMeta, GroupRelease, GroupResolution, GroupRuleStatus, GroupSnooze,
+        GroupTagValue, GroupTagKey, EventMapping, GroupEmailThread, GroupRedirect,
+        GroupSubscription, UserReport,
     )
     for model in bulk_model_list:
         has_more = bulk_delete_objects(model, group_id=object_id, logger=logger)
@@ -257,9 +260,11 @@ def delete_group(object_id, transaction_id=None, continuous=True, **kwargs):
                 kwargs={'object_id': object_id, 'transaction_id': transaction_id},
             )
         return
+
+    features.delete(group)
     g_id = group.id
     group.delete()
-    logger.info('object.delete.queued', extra={
+    logger.info('object.delete.executed', extra={
         'object_id': g_id,
         'transaction_id': transaction_id,
         'model': Group.__name__,
@@ -315,6 +320,91 @@ def delete_tag_key(object_id, transaction_id=None, continuous=True, **kwargs):
     })
 
 
+@instrumented_task(name='sentry.tasks.deletion.delete_api_application', queue='cleanup',
+                   default_retry_delay=60 * 5, max_retries=None)
+@retry(exclude=(DeleteAborted,))
+def delete_api_application(object_id, transaction_id=None, continuous=True,
+                           **kwargs):
+    from sentry.models import ApiApplication, ApiApplicationStatus, ApiGrant
+
+    try:
+        app = ApiApplication.objects.get(id=object_id)
+    except ApiApplication.DoesNotExist:
+        return
+
+    if app.status == ApiApplicationStatus.active:
+        raise DeleteAborted
+
+    if app.status != ApiApplicationStatus.deletion_in_progress:
+        app.update(status=ApiApplicationStatus.deletion_in_progress)
+
+    has_more = revoke_api_tokens(object_id)
+    if has_more:
+        if continuous:
+            delete_api_application.apply_async(
+                kwargs={
+                    'object_id': object_id,
+                    'transaction_id': transaction_id,
+                },
+                countdown=15,
+            )
+        return
+
+    bulk_model_list = (ApiGrant,)
+    for model in bulk_model_list:
+        has_more = bulk_delete_objects(model, application_id=app.id,
+                                       logger=logger)
+        if has_more:
+            if continuous:
+                delete_api_application.apply_async(
+                    kwargs={
+                        'object_id': object_id,
+                        'transaction_id': transaction_id,
+                    },
+                    countdown=15,
+                )
+            return
+
+    app.delete()
+    logger.info('object.delete.executed', extra={
+        'object_id': object_id,
+        'transaction_id': transaction_id,
+        'model': ApiApplication.__name__,
+    })
+
+
+@instrumented_task(name='sentry.tasks.deletion.revoke_api_tokens', queue='cleanup',
+                   default_retry_delay=60 * 5, max_retries=None)
+@retry(exclude=(DeleteAborted,))
+def revoke_api_tokens(object_id, transaction_id=None, continuous=True,
+                      timestamp=None, **kwargs):
+    from sentry.models import ApiToken
+
+    queryset = ApiToken.objects.filter(
+        application=object_id,
+    )
+    if timestamp:
+        queryset = queryset.filter(date_added__lte=timestamp)
+
+    # we're using a slow deletion strategy to avoid a lot of custom code for
+    # mysql/postgres
+    has_more = False
+    for obj in queryset[:1000]:
+        obj.delete()
+        has_more = True
+
+    if has_more and continuous:
+        revoke_api_tokens.apply_async(
+            kwargs={
+                'object_id': object_id,
+                'transaction_id': transaction_id,
+                'timestamp': timestamp,
+            },
+            countdown=15,
+        )
+    return has_more
+
+
 @instrumented_task(name='sentry.tasks.deletion.generic_delete', queue='cleanup',
                    default_retry_delay=60 * 5, max_retries=None)
 @retry(exclude=(DeleteAborted,))
@@ -352,7 +442,6 @@ def generic_delete(app_label, model_name, object_id, transaction_id=None,
 
 
 def delete_events(relation, transaction_id=None, limit=10000, chunk_limit=100, logger=None):
-    from sentry.app import nodestore
     from sentry.models import Event, EventTag
 
     while limit > 0:
@@ -415,3 +504,49 @@ def delete_objects(models, relation, transaction_id=None, limit=100, logger=None
         if has_more:
             return True
     return has_more
+
+
+@instrumented_task(name='sentry.tasks.deletion.delete_repository', queue='cleanup',
+                   default_retry_delay=60 * 5, max_retries=None)
+@retry(exclude=(DeleteAborted,))
+def delete_repository(object_id, transaction_id=None, continuous=True,
+                      actor_id=None, **kwargs):
+    from sentry.models import Commit, Repository, User
+
+    try:
+        repo = Repository.objects.get(id=object_id)
+    except Repository.DoesNotExist:
+        return
+
+    if repo.status == ObjectStatus.VISIBLE:
+        raise DeleteAborted
+
+    if repo.status == ObjectStatus.PENDING_DELETION:
+        if actor_id:
+            actor = User.objects.get(id=actor_id)
+        else:
+            actor = None
+        repo.update(status=ObjectStatus.DELETION_IN_PROGRESS)
+        pending_delete.send(sender=Repository, instance=repo, actor=actor)
+
+    has_more = delete_objects(
+        (Commit,),
+        transaction_id=transaction_id,
+        relation={'repository_id': repo.id},
+        logger=logger,
+    )
+    if has_more:
+        if continuous:
+            delete_repository.apply_async(
+                kwargs={'object_id': object_id, 'transaction_id': transaction_id},
+                countdown=15,
+            )
+        return
+
+    repo_id = repo.id
+    repo.delete()
+    logger.info('object.delete.executed', extra={
+        'object_id': repo_id,
+        'transaction_id': transaction_id,
+        'model': Repository.__name__,
+    })

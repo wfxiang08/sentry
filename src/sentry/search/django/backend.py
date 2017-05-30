@@ -44,13 +44,13 @@ class DjangoSearchBackend(SearchBackend):
                 base_qs = GroupTagValue.objects.filter(
                     key=k,
                     value=v,
-                    project=project,
+                    project_id=project.id,
                 )
 
             else:
                 base_qs = GroupTagValue.objects.filter(
                     key=k,
-                    project=project,
+                    project_id=project.id,
                 ).distinct()
 
             if matches:
@@ -75,12 +75,16 @@ class DjangoSearchBackend(SearchBackend):
                         date_to=None, date_to_inclusive=True,
                         active_at_from=None, active_at_from_inclusive=True,
                         active_at_to=None, active_at_to_inclusive=True,
+                        times_seen=None,
+                        times_seen_lower=None, times_seen_lower_inclusive=True,
+                        times_seen_upper=None, times_seen_upper_inclusive=True,
                         cursor=None, limit=None):
         from sentry.models import Event, Group, GroupSubscription, GroupStatus
 
         engine = get_db_engine('default')
 
         queryset = Group.objects.filter(project=project)
+
         if query:
             # TODO(dcramer): if we want to continue to support search on SQL
             # we should at least optimize this in Postgres so that it does
@@ -92,13 +96,12 @@ class DjangoSearchBackend(SearchBackend):
             )
 
         if status is None:
-            queryset = queryset.exclude(
-                status__in=(
-                    GroupStatus.PENDING_DELETION,
-                    GroupStatus.DELETION_IN_PROGRESS,
-                    GroupStatus.PENDING_MERGE,
-                )
+            status_in = (
+                GroupStatus.PENDING_DELETION,
+                GroupStatus.DELETION_IN_PROGRESS,
+                GroupStatus.PENDING_MERGE,
             )
+            queryset = queryset.exclude(status__in=status_in)
         else:
             queryset = queryset.filter(status=status)
 
@@ -183,6 +186,23 @@ class DjangoSearchBackend(SearchBackend):
                     params['active_at__lte'] = active_at_to
                 else:
                     params['active_at__lt'] = active_at_to
+            queryset = queryset.filter(**params)
+
+        if times_seen is not None:
+            queryset = queryset.filter(times_seen=times_seen)
+
+        if times_seen_lower is not None or times_seen_upper is not None:
+            params = {}
+            if times_seen_lower is not None:
+                if times_seen_lower_inclusive:
+                    params['times_seen__gte'] = times_seen_lower
+                else:
+                    params['times_seen__gt'] = times_seen_lower
+            if times_seen_upper is not None:
+                if times_seen_upper_inclusive:
+                    params['times_seen__lte'] = times_seen_upper
+                else:
+                    params['times_seen__lt'] = times_seen_upper
             queryset = queryset.filter(**params)
 
         if date_from or date_to:

@@ -49,7 +49,7 @@ build: locale
 
 clean:
 	@echo "--> Cleaning static cache"
-	rm -f dist/* static/dist/*
+	rm -rf dist/* static/dist/*
 	@echo "--> Cleaning integration docs cache"
 	rm -rf src/sentry/integration-docs
 	@echo "--> Cleaning pyc files"
@@ -120,7 +120,7 @@ test-acceptance:
 
 test-python-coverage:
 	@echo "--> Running Python tests"
-	coverage run --source=src/sentry -m py.test tests/integration tests/sentry
+	SOUTH_TESTS_MIGRATE=1 coverage run --source=src/sentry -m py.test tests/integration tests/sentry
 	@echo ""
 
 lint: lint-python lint-js
@@ -179,6 +179,8 @@ travis-install-acceptance: install-yarn travis-install-postgres
 travis-install-js: travis-upgrade-pip install-python install-python-tests install-yarn
 travis-install-cli: travis-install-postgres
 travis-install-dist: travis-upgrade-pip install-python install-python-tests install-yarn
+travis-install-django-18: travis-install-postgres
+	pip install "Django>=1.8,<1.9"
 
 .PHONY: travis-install-danger travis-install-sqlite travis-install-postgres travis-install-js travis-install-cli travis-install-dist
 
@@ -191,6 +193,7 @@ travis-lint-acceptance: travis-noop
 travis-lint-js: lint-js
 travis-lint-cli: travis-noop
 travis-lint-dist: travis-noop
+travis-lint-django-18: travis-lint-postgres
 
 .PHONY: travis-lint-danger travis-lint-sqlite travis-lint-postgres travis-lint-mysql travis-lint-js travis-lint-cli travis-lint-dist
 
@@ -206,5 +209,6 @@ travis-test-cli: test-cli
 travis-test-dist:
 	SENTRY_BUILD=$(TRAVIS_COMMIT) SENTRY_LIGHT_BUILD=0 python setup.py sdist bdist_wheel
 	@ls -lh dist/
+travis-test-django-18: travis-test-postgres
 
 .PHONY: travis-test-danger travis-test-sqlite travis-test-postgres travis-test-mysql travis-test-js travis-test-cli travis-test-dist

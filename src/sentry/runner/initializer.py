@@ -11,13 +11,15 @@ import click
 import os
 import six
 
+from django.conf import settings
+
 from sentry.utils import warnings
 from sentry.utils.warnings import DeprecatedSettingWarning
 
 
 def register_plugins(settings):
     from pkg_resources import iter_entry_points
-    from sentry.plugins import bindings, plugins
+    from sentry.plugins import plugins
     # entry_points={
     #    'sentry.plugins': [
     #         'phabricator = sentry_phabricator.plugins:PhabricatorPlugin'
@@ -34,7 +36,39 @@ def register_plugins(settings):
             plugins.register(plugin)
 
     for plugin in plugins.all(version=None):
-        plugin.setup(bindings)
+        init_plugin(plugin)
+
+
+def init_plugin(plugin):
+    from sentry.plugins import bindings
+    plugin.setup(bindings)
+
+    # Register contexts from plugins if necessary
+    if hasattr(plugin, 'get_custom_contexts'):
+        from sentry.interfaces.contexts import contexttype
+        for cls in plugin.get_custom_contexts() or ():
+            contexttype(cls)
+
+    if (hasattr(plugin, 'get_cron_schedule') and plugin.is_enabled()):
+        schedules = plugin.get_cron_schedule()
+        if schedules:
+            settings.CELERYBEAT_SCHEDULE.update(schedules)
+
+    if (hasattr(plugin, 'get_worker_imports') and plugin.is_enabled()):
+        imports = plugin.get_worker_imports()
+        if imports:
+            settings.CELERY_IMPORTS += tuple(imports)
+
+    if (hasattr(plugin, 'get_worker_queues') and plugin.is_enabled()):
+        from kombu import Queue
+        for queue in plugin.get_worker_queues():
+            try:
+                name, routing_key = queue
+            except ValueError:
+                name = routing_key = queue
+            q = Queue(name, routing_key=routing_key)
+            q.durable = False
+            settings.CELERY_QUEUES.append(q)
 
 
 def initialize_receivers():
@@ -201,14 +235,15 @@ def configure_structlog():
     logging.config.dictConfig(settings.LOGGING)
 
 
-def initialize_app(config, skip_backend_validation=False):
+def initialize_app(config, skip_service_validation=False):
     settings = config['settings']
 
     bootstrap_options(settings, config['options'])
 
     configure_structlog()
 
-    fix_south(settings)
+    if 'south' in settings.INSTALLED_APPS:
+        fix_south(settings)
 
     apply_legacy_settings(settings)
 
@@ -251,8 +286,7 @@ def initialize_app(config, skip_backend_validation=False):
 
     validate_options(settings)
 
-    if not skip_backend_validation:
-        validate_backends()
+    setup_services(validate=not skip_service_validation)
 
     from django.utils import timezone
     from sentry.app import env
@@ -261,21 +295,48 @@ def initialize_app(config, skip_backend_validation=False):
     env.data['start_date'] = timezone.now()
 
 
-def validate_backends():
-    from sentry import app
+def setup_services(validate=True):
+    from sentry import (
+        analytics, buffer, digests, newsletter, nodestore, quotas, ratelimits,
+        search, tsdb
+    )
+    from .importer import ConfigurationError
+    from sentry.utils.settings import reraise_as
 
-    backends = (
-        app.buffer,
-        app.digests,
-        app.nodestore,
-        app.quotas,
-        app.ratelimiter,
-        app.search,
-        app.tsdb,
+    service_list = (
+        analytics,
+        buffer,
+        digests,
+        newsletter,
+        nodestore,
+        quotas,
+        ratelimits,
+        search,
+        tsdb,
     )
 
-    for backend in backends:
-        backend.validate()
+    for service in service_list:
+        if validate:
+            try:
+                service.validate()
+            except AttributeError as exc:
+                reraise_as(ConfigurationError(
+                    '{} service failed to call validate()\n{}'.format(
+                        service.__name__,
+                        six.text_type(exc),
+                    )
+                ))
+        try:
+            service.setup()
+        except AttributeError as exc:
+            if not hasattr(service, 'setup') or not callable(service.setup):
+                reraise_as(ConfigurationError(
+                    '{} service failed to call setup()\n{}'.format(
+                        service.__name__,
+                        six.text_type(exc),
+                    )
+                ))
+            raise
 
 
 def validate_options(settings):
@@ -437,5 +498,6 @@ def on_configure(config):
     """
     settings = config['settings']
 
-    skip_migration_if_applied(
-        settings, 'social_auth', 'social_auth_association')
+    if 'south' in settings.INSTALLED_APPS:
+        skip_migration_if_applied(
+            settings, 'social_auth', 'social_auth_association')

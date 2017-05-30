@@ -43,7 +43,7 @@ class AppearanceSettingsTest(TestCase):
         })
         assert resp.status_code == 302
 
-        options = UserOption.objects.get_all_values(user=self.user, project=None)
+        options = UserOption.objects.get_all_values(user=self.user)
 
         assert options.get('language') == 'en'
         assert options.get('stacktrace_order') == '2'
@@ -240,7 +240,7 @@ class RecoverPasswordTest(TestCase):
         assert resp.status_code == 200
         self.assertTemplateUsed(resp, 'sentry/account/recover/sent.html')
         assert 'email' in resp.context
-        send_recover_mail.assert_called_once_with()
+        send_recover_mail.call_count == 1
 
 
 class RecoverPasswordConfirmTest(TestCase):

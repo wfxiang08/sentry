@@ -437,6 +437,44 @@ class EventManagerTest(TransactionTestCase):
         group = event.group
         assert group.first_release.version == '1.0'
 
+    def test_release_project_slug(self):
+        project = self.create_project(name='foo')
+        release = Release.objects.create(
+            version='foo-1.0',
+            organization=project.organization
+        )
+        release.add_project(project)
+
+        manager = EventManager(self.make_event(release='1.0'))
+        event = manager.save(project.id)
+
+        group = event.group
+        assert group.first_release.version == 'foo-1.0'
+        release_tag = [v for k, v in event.tags if k == 'sentry:release'][0]
+        assert release_tag == 'foo-1.0'
+
+        manager = EventManager(self.make_event(release='2.0'))
+        event = manager.save(project.id)
+
+        group = event.group
+        assert group.first_release.version == 'foo-1.0'
+
+    def test_release_project_slug_long(self):
+        project = self.create_project(name='foo')
+        release = Release.objects.create(
+            version='foo-%s' % ('a' * 60,),
+            organization=project.organization
+        )
+        release.add_project(project)
+
+        manager = EventManager(self.make_event(release=('a' * 61)))
+        event = manager.save(project.id)
+
+        group = event.group
+        assert group.first_release.version == 'foo-%s' % ('a' * 60,)
+        release_tag = [v for k, v in event.tags if k == 'sentry:release'][0]
+        assert release_tag == 'foo-%s' % ('a' * 60,)
+
     def test_group_release_no_env(self):
         manager = EventManager(self.make_event(release='1.0'))
         event = manager.save(1)
@@ -518,7 +556,8 @@ class EventManagerTest(TransactionTestCase):
             }
         }))
         manager.normalize()
-        event = manager.save(self.project.id)
+        with self.tasks():
+            event = manager.save(self.project.id)
 
         assert tsdb.get_distinct_counts_totals(
             tsdb.models.users_affected_by_group,
@@ -538,26 +577,27 @@ class EventManagerTest(TransactionTestCase):
             event.project.id: 1,
         }
 
-        assert EventUser.objects.filter(
+        euser = EventUser.objects.get(
             project=self.project,
             ident='1',
-        ).exists()
-        assert 'sentry:user' in dict(event.tags)
+        )
+        assert event.get_tag('sentry:user') == euser.tag_value
 
         # ensure event user is mapped to tags in second attempt
         manager = EventManager(self.make_event(**{
             'sentry.interfaces.User': {
                 'id': '1',
+                'name': 'jane',
             }
         }))
         manager.normalize()
-        event = manager.save(self.project.id)
+        with self.tasks():
+            event = manager.save(self.project.id)
 
-        assert EventUser.objects.filter(
-            project=self.project,
-            ident='1',
-        ).exists()
-        assert 'sentry:user' in dict(event.tags)
+        euser = EventUser.objects.get(id=euser.id)
+        assert event.get_tag('sentry:user') == euser.tag_value
+        assert euser.name == 'jane'
+        assert euser.ident == '1'
 
     def test_event_user_unicode_identifier(self):
         manager = EventManager(self.make_event(**{
@@ -566,7 +606,8 @@ class EventManagerTest(TransactionTestCase):
             }
         }))
         manager.normalize()
-        manager.save(self.project.id)
+        with self.tasks():
+            manager.save(self.project.id)
         euser = EventUser.objects.get(
             project=self.project,
         )

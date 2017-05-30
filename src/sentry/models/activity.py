@@ -8,14 +8,13 @@ sentry.models.activity
 from __future__ import absolute_import
 
 import six
-
 from django.conf import settings
 from django.db import models
 from django.db.models import F
 from django.utils import timezone
 
 from sentry.db.models import (
-    Model, BoundedPositiveIntegerField, FlexibleForeignKey, GzippedDictField,
+    BoundedPositiveIntegerField, FlexibleForeignKey, GzippedDictField, Model,
     sane_repr
 )
 from sentry.tasks import activity
@@ -39,12 +38,18 @@ class Activity(Model):
     SET_RESOLVED_IN_RELEASE = 13
     MERGE = 14
     SET_RESOLVED_BY_AGE = 15
+    SET_RESOLVED_IN_COMMIT = 16
+    DEPLOY = 17
+    NEW_PROCESSING_ISSUES = 18
+    UNMERGE_SOURCE = 19
+    UNMERGE_DESTINATION = 20
 
     TYPE = (
         # (TYPE, verb-slug)
         (SET_RESOLVED, 'set_resolved'),
         (SET_RESOLVED_BY_AGE, 'set_resolved_by_age'),
         (SET_RESOLVED_IN_RELEASE, 'set_resolved_in_release'),
+        (SET_RESOLVED_IN_COMMIT, 'set_resolved_in_commit'),
         (SET_UNRESOLVED, 'set_unresolved'),
         (SET_IGNORED, 'set_ignored'),
         (SET_PUBLIC, 'set_public'),
@@ -57,6 +62,10 @@ class Activity(Model):
         (ASSIGNED, 'assigned'),
         (UNASSIGNED, 'unassigned'),
         (MERGE, 'merge'),
+        (DEPLOY, 'deploy'),
+        (NEW_PROCESSING_ISSUES, 'new_processing_issues'),
+        (UNMERGE_SOURCE, 'unmerge_source'),
+        (UNMERGE_DESTINATION, 'unmerge_destination'),
     )
 
     project = FlexibleForeignKey('sentry.Project')
@@ -81,7 +90,7 @@ class Activity(Model):
         from sentry.models import Release
 
         # XXX(dcramer): fix for bad data
-        if self.type == self.RELEASE and isinstance(self.data['version'], Release):
+        if self.type in (self.RELEASE, self.DEPLOY) and isinstance(self.data['version'], Release):
             self.data['version'] = self.data['version'].version
         if self.type == self.ASSIGNED:
             self.data['assignee'] = six.text_type(self.data['assignee'])

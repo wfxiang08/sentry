@@ -45,6 +45,12 @@ the latest list of integrations and serve them in your local Sentry install.
 logger = logging.getLogger('sentry')
 
 
+def echo(what):
+    sys.stdout.write(what)
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+
+
 def dump_doc(path, data):
     fn = os.path.join(DOC_FOLDER, path + '.json')
     directory = os.path.dirname(fn)
@@ -75,7 +81,7 @@ def get_integration_id(platform_id, integration_id):
 
 
 def sync_docs():
-    print('syncing documentation (platform index)')
+    echo('syncing documentation (platform index)')
     body = urlopen(BASE_URL.format('_index.json')).read().decode('utf-8')
     data = json.loads(body)
     platform_list = []
@@ -107,7 +113,7 @@ def sync_docs():
 
 
 def sync_integration_docs(platform_id, integration_id, path):
-    print('  syncing documentation for %s.%s integration' % (
+    echo('  syncing documentation for %s.%s integration' % (
         platform_id, integration_id
     ))
 

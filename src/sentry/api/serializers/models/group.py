@@ -8,8 +8,8 @@ from django.core.urlresolvers import reverse
 from django.db.models import Q
 from django.utils import timezone
 
+from sentry import tsdb
 from sentry.api.serializers import Serializer, register, serialize
-from sentry.app import tsdb
 from sentry.constants import LOG_LEVELS
 from sentry.models import (
     Group, GroupAssignee, GroupBookmark, GroupMeta, GroupResolution,
@@ -26,6 +26,7 @@ SUBSCRIPTION_REASON_MAP = {
     GroupSubscriptionReason.assigned: 'assigned',
     GroupSubscriptionReason.bookmark: 'bookmarked',
     GroupSubscriptionReason.status_change: 'changed_status',
+    GroupSubscriptionReason.mentioned: 'mentioned',
 }
 
 
@@ -188,8 +189,13 @@ class GroupSerializer(Serializer):
         else:
             status_label = 'unresolved'
 
-        permalink = absolute_uri(reverse('sentry-group', args=[
-            obj.organization.slug, obj.project.slug, obj.id]))
+        # If user is not logged in and member of the organization,
+        # do not return the permalink which contains private information i.e. org name.
+        if user.is_authenticated() and user.get_orgs().filter(id=obj.organization.id).exists():
+            permalink = absolute_uri(reverse('sentry-group', args=[
+                obj.organization.slug, obj.project.slug, obj.id]))
+        else:
+            permalink = None
 
         is_subscribed, subscription = attrs['subscription']
 
@@ -239,11 +245,12 @@ class StreamGroupSerializer(GroupSerializer):
         '24h': StatsPeriod(24, timedelta(hours=1)),
     }
 
-    def __init__(self, stats_period=None):
+    def __init__(self, stats_period=None, matching_event_id=None):
         if stats_period is not None:
             assert stats_period in self.STATS_PERIOD_CHOICES
 
         self.stats_period = stats_period
+        self.matching_event_id = matching_event_id
 
     def get_attrs(self, item_list, user):
         attrs = super(StreamGroupSerializer, self).get_attrs(item_list, user)
@@ -277,6 +284,21 @@ class StreamGroupSerializer(GroupSerializer):
                 self.stats_period: attrs['stats'],
             }
 
+        if self.matching_event_id:
+            result['matchingEventId'] = self.matching_event_id
+
+        return result
+
+
+class TagBasedStreamGroupSerializer(StreamGroupSerializer):
+    def __init__(self, tags, **kwargs):
+        super(TagBasedStreamGroupSerializer, self).__init__(**kwargs)
+        self.tags = tags
+
+    def serialize(self, obj, attrs, user):
+        result = super(TagBasedStreamGroupSerializer, self).serialize(obj, attrs, user)
+        result['tagLastSeen'] = self.tags[obj.id].last_seen
+        result['tagFirstSeen'] = self.tags[obj.id].first_seen
         return result
 
 

@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 from datetime import timedelta
+import logging
 from uuid import uuid4
 
 import six
@@ -9,28 +10,37 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.response import Response
 
+from sentry import search
 from sentry.api.base import DocSection
 from sentry.api.bases.project import ProjectEndpoint, ProjectEventPermission
+from sentry.api.fields import UserField
 from sentry.api.serializers import serialize
 from sentry.api.serializers.models.group import (
     SUBSCRIPTION_REASON_MAP, StreamGroupSerializer
 )
-from sentry.app import search
 from sentry.constants import DEFAULT_SORT_OPTION
 from sentry.db.models.query import create_or_update
 from sentry.models import (
-    Activity, EventMapping, Group, GroupBookmark, GroupHash, GroupResolution,
-    GroupSeen, GroupSnooze, GroupStatus, GroupSubscription,
-    GroupSubscriptionReason, Release, TagKey
+    Activity, EventMapping, Group, GroupAssignee, GroupBookmark, GroupHash,
+    GroupResolution, GroupSeen, GroupSnooze, GroupStatus, GroupSubscription,
+    GroupSubscriptionReason, Release, TagKey, UserOption
 )
+from sentry.models.event import Event
 from sentry.models.group import looks_like_short_id
+from sentry.receivers import DEFAULT_SAVED_SEARCHES
 from sentry.search.utils import InvalidQuery, parse_query
+from sentry.signals import advanced_search, issue_resolved_in_release
 from sentry.tasks.deletion import delete_group
 from sentry.tasks.merge import merge_group
 from sentry.utils.apidocs import attach_scenarios, scenario
 from sentry.utils.cursors import Cursor
+from sentry.utils.functional import extract_lazy_object
+
+delete_logger = logging.getLogger('sentry.deletions.api')
+
 
 ERR_INVALID_STATS_PERIOD = "Invalid stats_period. Valid choices are '', '24h', and '14d'"
+SAVED_SEARCH_QUERIES = set([s['query'] for s in DEFAULT_SAVED_SEARCHES])
 
 
 @scenario('BulkUpdateIssues')
@@ -81,7 +91,7 @@ class ValidationError(Exception):
     pass
 
 
-class GroupSerializer(serializers.Serializer):
+class GroupValidator(serializers.Serializer):
     status = serializers.ChoiceField(choices=zip(
         STATUS_CHOICES.keys(), STATUS_CHOICES.keys()
     ))
@@ -91,9 +101,16 @@ class GroupSerializer(serializers.Serializer):
     isSubscribed = serializers.BooleanField()
     merge = serializers.BooleanField()
     ignoreDuration = serializers.IntegerField()
+    assignedTo = UserField()
 
     # TODO(dcramer): remove in 9.0
     snoozeDuration = serializers.IntegerField()
+
+    def validate_assignedTo(self, attrs, source):
+        value = attrs[source]
+        if value and not self.context['project'].member_set.filter(user=value).exists():
+            raise serializers.ValidationError('Cannot assign to non-team member')
+        return attrs
 
 
 class ProjectGroupIndexEndpoint(ProjectEndpoint):
@@ -152,6 +169,21 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
 
         return query_kwargs
 
+    def _subscribe_and_assign_issue(self, acting_user, group, result):
+        if acting_user:
+            GroupSubscription.objects.subscribe(
+                user=acting_user,
+                group=group,
+                reason=GroupSubscriptionReason.status_change,
+            )
+            self_assign_issue = UserOption.objects.get_value(
+                user=acting_user,
+                key='self_assign_issue',
+                default='0'
+            )
+            if self_assign_issue == '1' and not group.assignee_set.exists():
+                result['assignedTo'] = extract_lazy_object(acting_user)
+
     # bookmarks=0/1
     # status=<x>
     # <tag>=<value>
@@ -165,7 +197,7 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
         Return a list of issues (groups) bound to a project.  All parameters are
         supplied as query string parameters.
 
-        A default query of ``is:resolved`` is applied. To return results
+        A default query of ``is:unresolved`` is applied. To return results
         with other statuses send an new query value (i.e. ``?query=`` for all
         results).
 
@@ -183,7 +215,7 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                                     Set to `1` to enable.
         :qparam querystring query: an optional Sentry structured search
                                    query.  If not provided an implied
-                                   ``"is:resolved"`` is assumed.)
+                                   ``"is:unresolved"`` is assumed.)
         :pparam string organization_slug: the slug of the organization the
                                           issues belong to.
         :pparam string project_slug: the slug of the project the issues
@@ -201,8 +233,10 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
             stats_period = None
 
         query = request.GET.get('query', '').strip()
+
         if query:
             matching_group = None
+            matching_event = None
             if len(query) == 32:
                 # check to see if we've got an event ID
                 try:
@@ -214,6 +248,10 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                     pass
                 else:
                     matching_group = Group.objects.get(id=mapping.group_id)
+                    try:
+                        matching_event = Event.objects.get(event_id=query, project_id=project.id)
+                    except Event.DoesNotExist:
+                        pass
 
             # If the query looks like a short id, we want to provide some
             # information about where that is.  Note that this can return
@@ -222,14 +260,14 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                     looks_like_short_id(query):
                 try:
                     matching_group = Group.objects.by_qualified_short_id(
-                        project.organization, query)
+                        project.organization_id, query)
                 except Group.DoesNotExist:
                     matching_group = None
 
             if matching_group is not None:
                 response = Response(serialize(
                     [matching_group], request.user, StreamGroupSerializer(
-                        stats_period=stats_period
+                        stats_period=stats_period, matching_event_id=getattr(matching_event, 'id', None)
                     )
                 ))
                 response['X-Sentry-Direct-Hit'] = '1'
@@ -262,6 +300,9 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
             self.build_cursor_link(request, 'previous', cursor_result.prev),
             self.build_cursor_link(request, 'next', cursor_result.next),
         ])
+
+        if results and query not in SAVED_SEARCH_QUERIES:
+            advanced_search.send(project=project, sender=request.user)
 
         return response
 
@@ -300,11 +341,13 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
         :pparam string project_slug: the slug of the project the issues
                                      belong to.
         :param string status: the new status for the issues.  Valid values
-                              are ``"resolved"``, ``"unresolved"`` and
-                              ``"ignored"``.
+                              are ``"resolved"``, ``resolvedInNextRelease``,
+                              ``"unresolved"``, and ``"ignored"``.
         :param int ignoreDuration: the number of minutes to ignore this issue.
         :param boolean isPublic: sets the issue to public or private.
         :param boolean merge: allows to merge or unmerge different issues.
+        :param string assignedTo: the username of the user that should be
+                                  assigned to this issue.
         :param boolean hasSeen: in case this API call is invoked with a user
                                 context this allows changing of the flag
                                 that indicates if the user has seen the
@@ -324,10 +367,13 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
         else:
             group_list = None
 
-        serializer = GroupSerializer(data=request.DATA, partial=True)
+        serializer = GroupValidator(
+            data=request.DATA,
+            partial=True,
+            context={'project': project},
+        )
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
-
         result = dict(serializer.object)
 
         acting_user = request.user if request.user.is_authenticated() else None
@@ -361,7 +407,7 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                     organization_id=project.organization_id
                 ).order_by('-date_added')[0]
             except IndexError:
-                return Response('{"detail": "No release data present in the system to indicate form a basis for \'Next Release\'"}', status=400)
+                return Response('{"detail": "No release data present in the system to form a basis for \'Next Release\'"}', status=400)
 
             now = timezone.now()
 
@@ -377,12 +423,9 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                         group=group,
                     ), False
 
-                if acting_user:
-                    GroupSubscription.objects.subscribe(
-                        user=acting_user,
-                        group=group,
-                        reason=GroupSubscriptionReason.status_change,
-                    )
+                self._subscribe_and_assign_issue(
+                    acting_user, group, result
+                )
 
                 if created:
                     activity = Activity.objects.create(
@@ -400,6 +443,8 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                     # before sending notifications on bulk changes
                     if not is_bulk:
                         activity.send_notification()
+
+                    issue_resolved_in_release.send(project=project, sender=acting_user)
 
             queryset.update(
                 status=GroupStatus.RESOLVED,
@@ -431,12 +476,9 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                 for group in group_list:
                     group.status = GroupStatus.RESOLVED
                     group.resolved_at = now
-                    if acting_user:
-                        GroupSubscription.objects.subscribe(
-                            user=acting_user,
-                            group=group,
-                            reason=GroupSubscriptionReason.status_change,
-                        )
+                    self._subscribe_and_assign_issue(
+                        acting_user, group, result
+                    )
                     activity = Activity.objects.create(
                         project=group.project,
                         group=group,
@@ -522,6 +564,23 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
                                 reason=GroupSubscriptionReason.status_change,
                             )
                         activity.send_notification()
+
+        if 'assignedTo' in result:
+            if result['assignedTo']:
+                for group in group_list:
+                    GroupAssignee.objects.assign(group, result['assignedTo'],
+                                                 acting_user)
+
+                    if 'isSubscribed' not in result or result['assignedTo'] != request.user:
+                        GroupSubscription.objects.subscribe(
+                            group=group,
+                            user=result['assignedTo'],
+                            reason=GroupSubscriptionReason.assigned,
+                        )
+                result['assignedTo'] = serialize(result['assignedTo'])
+            else:
+                for group in group_list:
+                    GroupAssignee.objects.deassign(group, acting_user)
 
         if result.get('hasSeen') and project.member_set.filter(user=acting_user).exists():
             for group in group_list:
@@ -699,10 +758,29 @@ class ProjectGroupIndexEndpoint(ProjectEndpoint):
             ]
         ).update(status=GroupStatus.PENDING_DELETION)
         GroupHash.objects.filter(group__id__in=group_ids).delete()
+
+        transaction_id = uuid4().hex
+
         for group in group_list:
             delete_group.apply_async(
-                kwargs={'object_id': group.id},
+                kwargs={
+                    'object_id': group.id,
+                    'transaction_id': transaction_id,
+                },
                 countdown=3600,
             )
+
+            self.create_audit_entry(
+                request=request,
+                organization_id=project.organization_id,
+                target_object=group.id,
+                transaction_id=transaction_id,
+            )
+
+            delete_logger.info('object.delete.queued', extra={
+                'object_id': group.id,
+                'transaction_id': transaction_id,
+                'model': type(group).__name__,
+            })
 
         return Response(status=204)
