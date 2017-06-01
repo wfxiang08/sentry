@@ -213,6 +213,8 @@ urlpatterns += patterns(
 
     url(r'^account/', generic_react_page_view),
 
+    url(r'^onboarding/', generic_react_page_view),
+
     # Admin
     url(r'^manage/queue/$', AdminQueueView.as_view(),
         name='sentry-admin-queue'),
