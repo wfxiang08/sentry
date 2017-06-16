@@ -21,6 +21,7 @@ Schema Changes
 - Drop index on ``ReleaseEnvironment(project_id)``
 - Drop index on ``ReleaseCommit(project_id)``
 - Drop unique constraint on ``ReleaseEnvironment(project_id, release_id, environment_id)``
+- Added ScheduledJob
 
 API Changes
 ~~~~~~~~~~~
