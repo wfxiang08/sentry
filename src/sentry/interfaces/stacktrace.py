@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 """
 sentry.interfaces.stacktrace
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -389,6 +390,7 @@ class Frame(Interface):
             else:
                 output.append(remove_module_outliers(self.module))
         elif self.filename and not self.is_url() and not self.is_caused_by():
+            # 1. 文件名很重要
             output.append(remove_filename_outliers(self.filename, platform))
 
         if self.context_line is None:
@@ -406,6 +408,10 @@ class Frame(Interface):
             can_use_context = True
 
         # XXX: hack around what appear to be non-useful lines of context
+
+        # 2. context_line 的作用，如果不是太长，则可以作为hash
+        #    context_line 本身的信息可能不是很足够，不过基本上也能用吧
+        #    lineno,
         if can_use_context:
             output.append(self.context_line)
         elif not output:
@@ -421,7 +427,9 @@ class Frame(Interface):
             else:
                 output.append(remove_function_outliers(self.function))
         elif self.lineno is not None:
+            # 添加行号
             output.append(self.lineno)
+
         return output
 
     def get_api_context(self, is_public=False, pad_addr=None):
@@ -744,6 +752,7 @@ class Stacktrace(Interface):
             if len(frames) / float(total_frames) < 0.10:
                 return []
 
+        # 计算每个Frame的hash
         output = []
         for frame in frames:
             output.extend(frame.get_hash(platform))

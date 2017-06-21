@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 """
 sentry.interfaces.exception
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -46,6 +47,7 @@ class SingleException(Interface):
         if not (data.get('type') or data.get('value')):
             raise InterfaceValidationError("No 'type' or 'value' present")
 
+        # 将stacktrace转换成为: Stacktrace
         if data.get('stacktrace') and data['stacktrace'].get('frames'):
             stacktrace = Stacktrace.to_python(
                 data['stacktrace'],
@@ -144,14 +146,20 @@ class SingleException(Interface):
     def get_hash(self, platform=None):
         output = None
         if self.stacktrace:
+            # 平台的关系
             output = self.stacktrace.get_hash(platform=platform)
             if output and self.type:
                 output.append(self.type)
+
+        # 如果没有stacktrace, 则按照 type, value来聚类
         if not output:
             output = [s for s in [self.type, self.value] if s]
         return output
 
 
+'''
+    Exception中包含多个SingleException
+'''
 class Exception(Interface):
     """
     An exception consists of a list of values. In most cases, this list
@@ -257,6 +265,7 @@ class Exception(Interface):
         for value in self.values:
             if not value.stacktrace:
                 continue
+            # 异常类型， 以及stack_hash
             stack_hash = value.stacktrace.get_hash(
                 platform=platform,
                 system_frames=system_frames,
@@ -267,6 +276,7 @@ class Exception(Interface):
 
         if not output:
             for value in self.values:
+                # 这里的values都不包含 value.stacktrace
                 output.extend(value.get_hash(platform=platform))
 
         return output

@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 from __future__ import absolute_import
 
 import six
@@ -65,6 +66,7 @@ class Interface(object):
         if not hasattr(self, '_data'):
             self._data = {}
 
+    # getter/setter的实现
     def __getattr__(self, name):
         return self._data[name]
 

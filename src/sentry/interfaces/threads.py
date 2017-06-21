@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 from __future__ import absolute_import
 
 from sentry.interfaces.base import Interface
@@ -82,9 +83,12 @@ class Threads(Interface):
     def get_hash(self):
         if len(self.values) != 1:
             return []
+        # 以第一个元素的stacktrace为准
         stacktrace = self.values[0].get('stacktrace')
         if not stacktrace:
             return []
+
+        # 系统hash, app_hash呢?
         system_hash = stacktrace.get_hash(system_frames=True)
         if not system_hash:
             return []

@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 """
 sentry.interfaces.message
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -94,6 +95,7 @@ class Message(Interface):
         return 'sentry.interfaces.Message'
 
     def get_hash(self):
+        # message本身就是hash
         return [self.message]
 
     def to_string(self, event, is_public=False, **kwargs):

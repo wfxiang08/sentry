@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 from __future__ import absolute_import
 
 __all__ = ('Device',)
@@ -57,4 +58,5 @@ class Device(Interface):
         return 'device'
 
     def get_hash(self):
+        # 不同的device不区分处理
         return []
