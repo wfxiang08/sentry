@@ -110,8 +110,6 @@ function routes() {
         <Route path="authorizations/" component={errorHandler(AccountAuthorizations)} />
       </Route>
 
-      <Route path="/onboarding/" component={errorHandler(OnboardingWizard)} />
-
       <Route path="/api/" component={errorHandler(ApiLayout)}>
         <IndexRoute component={errorHandler(ApiTokens)} />
         <Route path="applications/" component={errorHandler(ApiApplications)} />
@@ -138,6 +136,11 @@ function routes() {
 
       <Route path="/:orgId/" component={errorHandler(OrganizationDetails)}>
         <IndexRoute component={errorHandler(OrganizationDashboard)} />
+
+        <Route
+          path="/organizations/:orgId/onboarding/"
+          component={errorHandler(OnboardingWizard)}
+        />
 
         <Route
           path="/organizations/:orgId/audit-log/"
