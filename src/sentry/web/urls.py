@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 """
 sentry.web.urls
 ~~~~~~~~~~~~~~~
@@ -104,8 +105,13 @@ urlpatterns += patterns(
     # Store endpoints first since they are the most active
     url(r'^api/store/$', api.StoreView.as_view(),
         name='sentry-api-store'),
+
+    # 调用最频繁的请求:
+    # POST /api/2/store/ HTTP/1.1
+    #
     url(r'^api/(?P<project_id>[\w_-]+)/store/$', api.StoreView.as_view(),
         name='sentry-api-store'),
+
     url(r'^api/(?P<project_id>\d+)/csp-report/$', api.CspReportView.as_view(),
         name='sentry-api-csp-report'),
     url(r'^api/(?P<project_id>[\w_-]+)/crossdomain\.xml$', api.crossdomain_xml,

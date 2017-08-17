@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 from __future__ import absolute_import, print_function
 
 import base64
@@ -296,7 +297,9 @@ class StoreView(APIView):
             # bubble up as an APIError.
             data = None
 
+        # 如何处理request？
         response_or_event_id = self.process(request, data=data, **kwargs)
+
         if isinstance(response_or_event_id, HttpResponse):
             return response_or_event_id
         return HttpResponse(json.dumps({
@@ -313,7 +316,11 @@ class StoreView(APIView):
             response['X-Sentry-ID'] = response_or_event_id
         return response
 
+    # 调用最频繁的请求:
+    # POST /api/2/store/ HTTP/1.1
+    #
     def process(self, request, project, key, auth, helper, data, **kwargs):
+        # 如何查看这些metrics
         metrics.incr('events.total')
 
         if not data:
@@ -321,6 +328,7 @@ class StoreView(APIView):
 
         remote_addr = request.META['REMOTE_ADDR']
 
+        # 将数据的解压缩等操作交给后端worker
         data = LazyData(
             data=data,
             content_encoding=request.META.get('HTTP_CONTENT_ENCODING', ''),
@@ -330,12 +338,14 @@ class StoreView(APIView):
             client_ip=remote_addr,
         )
 
+        # ???
         event_received.send_robust(
             ip=remote_addr,
             project=project,
             sender=type(self),
         )
 
+        # 过滤event
         if helper.should_filter(project, data, ip_address=remote_addr):
             tsdb.incr_multi([
                 (tsdb.models.project_total_received, project.id),
@@ -411,6 +421,7 @@ class StoreView(APIView):
         else:
             scrub_data = project.get_option('sentry:scrub_data', True)
 
+        # 过滤敏感字段
         if scrub_data:
             # We filter data immediately before it ever gets into the queue
             sensitive_fields_key = 'sentry:sensitive_fields'
@@ -444,6 +455,7 @@ class StoreView(APIView):
         # mutates data (strips a lot of context if not queued)
         helper.insert_data_to_database(data)
 
+        # invalid cache
         cache.set(cache_key, '', 60 * 5)
 
         helper.log.debug('New event received (%s)', event_id)

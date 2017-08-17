@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 from __future__ import absolute_import
 
 import logging
@@ -31,6 +32,7 @@ class Lock(object):
         raised.
         """
         try:
+            # 如何获取分布式锁
             self.backend.acquire(self.key, self.duration, self.routing_key)
         except Exception as error:
             six.raise_from(UnableToAcquireLock('Unable to acquire {!r} due to error: {}'.format(self, error)), error)

@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 """
 sentry.runner.commands.run
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -97,6 +98,7 @@ def web(bind, workers, upgrade, with_lock, noinput):
             else:
                 raise
 
+    # 启动Http Server
     from sentry.services.http import SentryHTTPServer
     SentryHTTPServer(
         host=bind[0],
@@ -157,6 +159,7 @@ def worker(**options):
     if settings.CELERY_ALWAYS_EAGER:
         raise click.ClickException('Disable CELERY_ALWAYS_EAGER in your settings file to spawn workers.')
 
+    # 启动Sentry Worker
     from sentry.celery import app
     worker = app.Worker(
         # without_gossip=True,
@@ -165,7 +168,9 @@ def worker(**options):
         pool_cls='processes',
         **options
     )
+    # 执行Worker
     worker.start()
+
     try:
         sys.exit(worker.exitcode)
     except AttributeError:

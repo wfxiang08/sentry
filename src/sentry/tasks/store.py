@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 """
 sentry.tasks.store
 ~~~~~~~~~~~~~~~~~~
@@ -49,6 +50,7 @@ def should_process(data):
 
 def _do_preprocess_event(cache_key, data, start_time, event_id,
                          process_event):
+    # 1. 读取数据
     if cache_key:
         data = default_cache.get(cache_key)
 
@@ -63,9 +65,11 @@ def _do_preprocess_event(cache_key, data, start_time, event_id,
         'project': project,
     })
 
+    # 这是什么意思? 再次delay
+    # 这里只是做预处理，处理完毕之后交给下一个环节
+    # start_time 是当前时间
     if should_process(data):
-        process_event.delay(cache_key=cache_key, start_time=start_time,
-            event_id=event_id)
+        process_event.delay(cache_key=cache_key, start_time=start_time, event_id=event_id)
         return
 
     # If we get here, that means the event had no preprocessing needed to be done
@@ -83,8 +87,7 @@ def _do_preprocess_event(cache_key, data, start_time, event_id,
     soft_time_limit=60,
 )
 def preprocess_event(cache_key=None, data=None, start_time=None, event_id=None, **kwargs):
-    return _do_preprocess_event(cache_key, data, start_time, event_id,
-                                process_event)
+    return _do_preprocess_event(cache_key, data, start_time, event_id, process_event)
 
 
 @instrumented_task(
@@ -99,6 +102,8 @@ def preprocess_event_from_reprocessing(cache_key=None, data=None,
                                 process_event_from_reprocessing)
 
 
+# 如何处理Event呢？
+# 负载最终的模块
 def _do_process_event(cache_key, start_time, event_id):
     from sentry.plugins import plugins
 
@@ -128,6 +133,7 @@ def _do_process_event(cache_key, start_time, event_id):
         processors = safe_execute(plugin.get_event_preprocessors,
                                   data=data, _with_transaction=False)
         for processor in (processors or ()):
+            # 通过plugin来处理event data
             result = safe_execute(processor, data)
             if result:
                 data = result
@@ -174,6 +180,8 @@ def delete_raw_event(project_id, event_id, allow_hint_clear=False):
             extra={'project_id': project_id})
         return
     from sentry.models import RawEvent, ReprocessingReport
+
+    # 如何删除RawEvent?
     RawEvent.objects.filter(
         project_id=project_id,
         event_id=event_id
@@ -185,6 +193,7 @@ def delete_raw_event(project_id, event_id, allow_hint_clear=False):
 
     # Clear the sent notification if we reprocessed everything
     # successfully and reprocessing is enabled
+    # 似乎可以做Cache
     reprocessing_active = ProjectOption.objects.get_value(
         project_id, 'sentry:reprocessing_active', REPROCESSING_DEFAULT)
     if reprocessing_active:
@@ -240,6 +249,7 @@ def create_failed_event(cache_key, project_id, issues, event_id, start_time=None
         error_logger.error('process.failed_raw.empty', extra={'cache_key': cache_key})
         return True
 
+    # 重新添加raw event
     from sentry.models import RawEvent, ProcessingIssue
     raw_event = RawEvent.objects.create(
         project_id=project_id,
@@ -249,6 +259,7 @@ def create_failed_event(cache_key, project_id, issues, event_id, start_time=None
         data=data
     )
 
+    # 添加Issue
     for issue in issues:
         ProcessingIssue.objects.record_processing_issue(
             raw_event=raw_event,

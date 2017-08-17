@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 """
 sentry.runner.commands.queues
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -23,6 +24,9 @@ def queues():
 def list(sort_size, reverse):
     "List queues and their sizes."
 
+    # source /www/sentry/bin/activate
+    # SENTRY_CONF=/etc/sentry sentry queues list
+    #
     from django.conf import settings
     from sentry.monitoring.queues import backend
 

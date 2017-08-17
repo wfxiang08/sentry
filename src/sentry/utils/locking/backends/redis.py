@@ -47,6 +47,7 @@ class RedisLockBackend(LockBackend):
     def acquire(self, key, duration, routing_key=None):
         client = self.get_client(key, routing_key)
         full_key = self.prefix_key(key)
+        # 不存在, 就设置一个lock, 否则就报错
         if client.set(full_key, self.uuid, ex=duration, nx=True) is not True:
             raise Exception('Could not set key: {!r}'.format(full_key))
 

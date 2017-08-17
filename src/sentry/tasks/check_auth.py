@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 """
 sentry.tasks.check_alerts
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -60,6 +61,7 @@ def check_auth_identity(auth_identity_id, **kwargs):
 
     auth_provider = auth_identity.auth_provider
 
+    # 检查Org, 不存在就删除
     try:
         om = OrganizationMember.objects.get(
             user=auth_identity.user,

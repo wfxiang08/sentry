@@ -157,5 +157,7 @@ class SentryHTTPServer(Service):
             env['PATH'] = '%s:%s' % (virtualenv_path, current_path)
 
     def run(self):
+        # 准备环境变量
         self.prepare_environment()
+        # 启动uwsgi server
         os.execvp('uwsgi', ('uwsgi',))

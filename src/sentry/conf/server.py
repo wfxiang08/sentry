@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 """
 sentry.conf.server
 ~~~~~~~~~~~~~~~~~~
@@ -468,6 +469,8 @@ CELERY_IMPORTS = (
     'sentry.tasks.store',
     'sentry.tasks.unmerge',
 )
+
+# 定义了Sentry工作搜使用的队列
 CELERY_QUEUES = [
     Queue('alerts', routing_key='alerts'),
     Queue('auth', routing_key='auth'),
@@ -512,8 +515,10 @@ def create_partitioned_queues(name):
 create_partitioned_queues('counters')
 create_partitioned_queues('triggers')
 
+# crontab如何工作呢？
+# 每分钟检查 auth, ping
+#
 from celery.schedules import crontab
-
 CELERYBEAT_SCHEDULE_FILENAME = os.path.join(tempfile.gettempdir(), 'sentry-celerybeat')
 CELERYBEAT_SCHEDULE = {
     'check-auth': {
@@ -538,6 +543,7 @@ CELERYBEAT_SCHEDULE = {
             'expires': 60,
         },
     },
+    # 这个似乎很重要?
     'flush-buffers': {
         'task': 'sentry.tasks.process_buffer.process_pending',
         'schedule': timedelta(seconds=10),
@@ -575,14 +581,6 @@ CELERYBEAT_SCHEDULE = {
             'expires': 300,
         },
     },
-    # Disabled for the time being:
-    # 'clear-old-cached-dsyms': {
-    #     'task': 'sentry.tasks.clear_old_cached_dsyms',
-    #     'schedule': timedelta(minutes=60),
-    #     'options': {
-    #         'expires': 3600,
-    #     },
-    # },
     'collect-project-platforms': {
         'task': 'sentry.tasks.collect_project_platforms',
         'schedule': timedelta(days=1),

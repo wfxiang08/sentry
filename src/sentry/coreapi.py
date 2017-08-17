@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 """
 sentry.coreapi
 ~~~~~~~~~~~~~~
@@ -776,14 +777,17 @@ class ClientApiHelper(object):
 
     def insert_data_to_database(self, data, from_reprocessing=False):
         # we might be passed LazyData
+        # 解码数据(
         if isinstance(data, LazyData):
             data = dict(data.items())
+        # 设置到cache
         cache_key = 'e:{1}:{0}'.format(data['project'], data['event_id'])
         default_cache.set(cache_key, data, timeout=3600)
-        task = from_reprocessing and \
-            preprocess_event_from_reprocessing or preprocess_event
-        task.delay(cache_key=cache_key, start_time=time(),
-            event_id=data['event_id'])
+
+        # 异步处理task
+        # 目前来看: api层的压力还好，主要是worker层的压力
+        task = from_reprocessing and preprocess_event_from_reprocessing or preprocess_event
+        task.delay(cache_key=cache_key, start_time=time(), event_id=data['event_id'])
 
 
 class CspApiHelper(ClientApiHelper):
