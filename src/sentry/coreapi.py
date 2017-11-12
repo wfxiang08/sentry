@@ -410,6 +410,10 @@ class ClientApiHelper(object):
             if not isinstance(data['culprit'], six.string_types):
                 raise APIForbidden('Invalid value for culprit')
 
+        # 每一个event都存在一个event_id?
+        # 如何根据event_id来过滤重复呢?
+        # event_id一般有客户端发送，可以方便服务器过滤重复的信息
+        #
         if not data.get('event_id'):
             data['event_id'] = uuid.uuid4().hex
         elif not isinstance(data['event_id'], six.string_types):

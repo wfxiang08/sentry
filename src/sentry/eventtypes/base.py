@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
 from sentry.utils.strings import truncatechars, strip
@@ -28,6 +29,9 @@ class DefaultEvent(BaseEvent):
 
     def get_metadata(self):
         # See GH-3248
+        # data 为一个dict
+        # message_interface 似乎也是一个dict
+        # unlabeled event 似乎??
         message_interface = self.data.get('sentry.interfaces.Message', {
             'message': self.data.get('message', ''),
         })
